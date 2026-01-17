@@ -120,6 +120,13 @@ async function yandexRequest(userId, method, apiPath, query = null, fileStream =
                 }
 
                 if (status >= 400) {
+                    // Для ошибки 409 (папка уже существует) не считаем это фатальной ошибкой при создании папки
+                    if (method === 'PUT' && status === 409) {
+                        resolve({ error: 'Already exists', status });
+                        return;
+                    }
+                    
+                    // Для других ошибок выбрасываем исключение
                     reject(new Error(`Ошибка Яндекс.Диска: ${status} - ${data}`));
                     return;
                 }
@@ -138,6 +145,20 @@ async function yandexRequest(userId, method, apiPath, query = null, fileStream =
             req.end();
         }
     });
+}
+
+async function ensureWeekFolder(userId, basePath) {
+    const weekFolder = getCurrentWeekFolder();
+    const fullPath = `${basePath}/${weekFolder}`;
+    
+    try {
+        await ensurePath(userId, fullPath);
+        console.log(`Папка недели создана или уже существует: ${fullPath}`);
+        return fullPath;
+    } catch (error) {
+        console.error('Ошибка при создании папки недели:', error);
+        throw error;
+    }
 }
 
 // Функция для загрузки файла на Яндекс.Диск
@@ -194,6 +215,100 @@ async function uploadToYandexDisk(userId, localFilePath, remoteFilePath) {
     } catch (error) {
         console.error('Ошибка при загрузке на Яндекс.Диск:', error);
         return false;
+    }
+}
+
+// Хранилище состояний визарда для каждого пользователя
+const wizardStates = new Map();
+// Хранилище счетчиков событий для каждой недели
+const eventCounters = new Map();
+
+// Функция для определения текущей недели (формат: "30.12.24 – 05.12.25")
+function getCurrentWeekFolder() {
+    const now = new Date();
+    const dayOfWeek = now.getDay();
+    const startOfWeek = new Date(now);
+    
+    // Начало недели - понедельник (day = 1)
+    const diff = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+    startOfWeek.setDate(now.getDate() - diff);
+    
+    // Конец недели - воскресенье
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(startOfWeek.getDate() + 6);
+    
+    // Форматируем даты
+    const formatDate = (date) => {
+        const day = String(date.getDate()).padStart(2, '0');
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const year = String(date.getFullYear()).slice(-2);
+        return `${day}.${month}.${year}`;
+    };
+    
+    return `${formatDate(startOfWeek)} – ${formatDate(endOfWeek)}`;
+}
+
+// Функция для получения ключа недели для счетчика событий
+function getWeekKey() {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), 0, 1);
+    const days = Math.floor((now - start) / (24 * 60 * 60 * 1000));
+    const weekNumber = Math.ceil((days + start.getDay() + 1) / 7);
+    return `${now.getFullYear()}-${weekNumber}`;
+}
+
+// Функция для получения порядкового номера события в текущей неделе
+function getNextEventNumber() {
+    const weekKey = getWeekKey();
+    let counter = eventCounters.get(weekKey) || 0;
+    counter++;
+    eventCounters.set(weekKey, counter);
+    return counter;
+}
+
+// Функция для проверки ночного времени (00:00 - 09:00 по МСК)
+function isNightTime() {
+    const now = new Date();
+    const moscowOffset = 3; // UTC+3
+    const moscowHours = (now.getUTCHours() + moscowOffset) % 24;
+    return moscowHours >= 0 && moscowHours < 9;
+}
+
+async function ensurePath(userId, folderPath) {
+    const settings = getUserSettings(userId);
+    
+    if (!settings.yandexToken) {
+        throw new Error('OAuth токен не установлен');
+    }
+
+    try {
+        // Разбиваем путь на части
+        const parts = folderPath.split('/').filter(part => part.length > 0);
+        let currentPath = '';
+        
+        // Постепенно создаем каждую папку
+        for (let i = 0; i < parts.length; i++) {
+            currentPath += '/' + parts[i];
+            
+            try {
+                // Пытаемся создать папку
+                await yandexRequest(userId, 'PUT', RESOURCE_URL, { path: currentPath });
+                console.log(`Создана папка: ${currentPath}`);
+            } catch (error) {
+                // Если папка уже существует (ошибка 409), игнорируем
+                if (error.message.includes('409')) {
+                    console.log(`Папка уже существует: ${currentPath}`);
+                    continue;
+                }
+                // Другие ошибки пробрасываем дальше
+                throw error;
+            }
+        }
+        
+        return true;
+    } catch (error) {
+        console.error('Ошибка при создании папок:', error);
+        throw error;
     }
 }
 
@@ -411,21 +526,18 @@ bot.action('disconnect_button', async (ctx) => {
     await ctx.reply('✅ Яндекс.Диск отключен. Фото будут сохраняться только локально.');
 });
 
-// Модифицированный обработчик фото для сохранения на Яндекс.Диск
+// Обработчик фото - запускает визард
 bot.on(message('photo'), async (ctx) => {
+    const userId = ctx.from.id;
+    
     try {
-        const userId = ctx.from.id;
-        const settings = getUserSettings(userId);
-        
-        // Получаем файл фото с максимальным качеством
+        // Сохраняем информацию о фото
         const photo = ctx.message.photo[ctx.message.photo.length - 1];
         const fileId = photo.file_id;
-        
-        // Получаем информацию о файле
         const file = await ctx.telegram.getFile(fileId);
         const filePath = file.file_path;
         
-        // Создаем уникальное имя файла
+        // Создаем уникальное имя файла для локального хранения
         const timestamp = Date.now();
         const random = Math.random().toString(36).substring(7);
         const fileName = `photo_${timestamp}_${random}.jpg`;
@@ -435,66 +547,535 @@ bot.on(message('photo'), async (ctx) => {
         const fileUrl = `https://api.telegram.org/file/bot${process.env.TOKEN_BOT}/${filePath}`;
         await downloadFile(fileUrl, filePathLocal);
         
-        // Сохраняем информацию о фото
-        const photoInfo = {
+        // Инициализируем состояние визарда
+        wizardStates.set(userId, {
+            step: 1,
             fileId,
             fileName,
-            timestamp: new Date().toISOString(),
-            user: {
-                id: userId,
-                username: ctx.from.username,
-                firstName: ctx.from.first_name,
-                lastName: ctx.from.last_name
-            },
-            chatId: ctx.message.chat.id,
-            caption: ctx.message.caption || ''
-        };
+            filePathLocal,
+            user: ctx.from,
+            caption: ctx.message.caption || '',
+            data: {}
+        });
         
-        const infoPath = path.join(photosDir, 'photo_info.json');
-        let allInfo = [];
-        
-        if (fs.existsSync(infoPath)) {
-            const existingData = fs.readFileSync(infoPath, 'utf8');
-            allInfo = JSON.parse(existingData);
-        }
-        
-        allInfo.push(photoInfo);
-        fs.writeFileSync(infoPath, JSON.stringify(allInfo, null, 2));
-        
-        let yandexStatus = '';
-        
-        // Пытаемся загрузить на Яндекс.Диск, если есть токен
-        if (settings.yandexToken) {
-            try {
-                const remotePath = `${settings.yandexPath}/${fileName}`;
-                const uploaded = await uploadToYandexDisk(userId, filePathLocal, remotePath);
-                
-                if (uploaded) {
-                    yandexStatus = '\n✅ Фото также сохранено на Яндекс.Диск';
-                } else {
-                    yandexStatus = '\n⚠️ Не удалось сохранить на Яндекс.Диск';
-                }
-            } catch (error) {
-                console.error('Ошибка Яндекс.Диска:', error);
-                yandexStatus = `\n⚠️ Ошибка Яндекс.Диска: ${error.message}`;
-            }
-        } else {
-            yandexStatus = '\nℹ️ Для сохранения на Яндекс.Диск используйте /auth';
-        }
-        
-        // Отправляем подтверждение пользователю
-        await ctx.reply(
-            `✅ Фото сохранено!\n` +
-            `📁 Имя файла: ${fileName}\n` +
-            `👤 От: ${ctx.from.first_name}${ctx.from.last_name ? ' ' + ctx.from.last_name : ''}\n` +
-            `📝 Подпись: ${ctx.message.caption || 'отсутствует'}${yandexStatus}`
-        );
-        
-        console.log(`Фото сохранено: ${filePathLocal}`);
+        // Отправляем первый шаг визарда
+        await sendStep1(ctx, userId);
         
     } catch (error) {
-        console.error('Ошибка при сохранении фото:', error);
-        await ctx.reply('❌ Произошла ошибка при сохранении фото');
+        console.error('Ошибка при обработке фото:', error);
+        await ctx.reply('❌ Произошла ошибка при обработке фото');
+    }
+});
+
+// Шаг 1: Выбор категории
+async function sendStep1(ctx, userId) {
+    const state = wizardStates.get(userId);
+    if (!state) return;
+    
+    const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback('🎮 Наказания в игре', 'category_punishments')],
+        [Markup.button.callback('📋 МП', 'category_mp')],
+        [Markup.button.callback('🤝 Помощь в МП', 'category_mp_help')],
+        [Markup.button.callback('⚡ События', 'category_events')],
+        [Markup.button.callback('❌ Отмена', 'cancel_wizard')]
+    ]);
+    
+    const message = await ctx.reply(
+        '📸 **Куда сохранить фото?**\n\n' +
+        '1. 🎮 **Наказания в игре** - отчеты о выданных наказаниях\n' +
+        '2. 📋 **МП** - отчеты о проведенных мероприятиях (админы 3+ уровня)\n' +
+        '3. 🤝 **Помощь в МП** - отчеты о помощи в проведении\n' +
+        '4. ⚡ **События** - отчеты о слежке за событиями\n\n' +
+        '_Выберите категорию:_',
+        { 
+            parse_mode: 'Markdown',
+            reply_markup: keyboard.reply_markup 
+        }
+    );
+    
+    // Сохраняем ID сообщения для редактирования
+    state.messageId = message.message_id;
+    state.chatId = ctx.chat.id;
+}
+
+// Шаг 2: Для событий - выбор типа события
+async function sendStep2(ctx, userId) {
+    const state = wizardStates.get(userId);
+    if (!state) return;
+    
+    const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback('🏰 Налёты, захваты', 'event_raids')],
+        [Markup.button.callback('🚚 Поставки, ограбления (Краз, Air)', 'event_supplies')],
+        [Markup.button.callback('⬅️ Назад', 'back_to_step1')],
+        [Markup.button.callback('❌ Отмена', 'cancel_wizard')]
+    ]);
+    
+    // Определяем, ночное ли время для событий
+    const nightPrefix = isNightTime() ? 'Ночные ' : '';
+    
+    await ctx.telegram.editMessageText(
+        state.chatId,
+        state.messageId,
+        null,
+        '⚡ **Выберите тип события:**\n\n' +
+        '1. 🏰 **' + nightPrefix + 'Налёты, захваты** - слежка за "Налёт", "Захват территории"\n' +
+        '2. 🚚 **' + nightPrefix + 'Поставки, ограбления (Краз, Air)** - слежка за "Поставка", "Ограбление", "Война за КрАЗ/AirDrop"\n\n' +
+        '_Для событий требуется 2 скриншота: начало и конец._',
+        { 
+            parse_mode: 'Markdown',
+            reply_markup: keyboard.reply_markup 
+        }
+    );
+    
+    state.step = 2;
+}
+
+// Шаг 3: Для событий - выбор этапа (начало/конец)
+async function sendStep3(ctx, userId, eventType) {
+    const state = wizardStates.get(userId);
+    if (!state) return;
+    
+    // Получаем порядковый номер события для текущей недели
+    const eventNumber = getNextEventNumber();
+    state.data.eventNumber = eventNumber;
+    state.data.eventType = eventType;
+    
+    const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback('🚀 Начало события', 'event_start')],
+        [Markup.button.callback('🏁 Конец события', 'event_end')],
+        [Markup.button.callback('⬅️ Назад', 'back_to_step2')],
+        [Markup.button.callback('❌ Отмена', 'cancel_wizard')]
+    ]);
+    
+    await ctx.telegram.editMessageText(
+        state.chatId,
+        state.messageId,
+        null,
+        `⚡ **Событие #${eventNumber}**\n\n` +
+        `Тип: ${eventType === 'raids' ? '🏰 Налёты, захваты' : '🚚 Поставки, ограбления (Краз, Air)'}\n\n` +
+        '📸 **Выберите этап события:**\n' +
+        '• 🚀 **Начало** - скриншот начала события\n' +
+        '• 🏁 **Конец** - скриншот окончания события\n\n' +
+        `Формат имени файла: ${eventNumber}-1 (начало) или ${eventNumber}-2 (конец)`,
+        { 
+            parse_mode: 'Markdown',
+            reply_markup: keyboard.reply_markup 
+        }
+    );
+    
+    state.step = 3;
+}
+
+// Функция сохранения фото на Яндекс.Диск
+async function savePhotoToYandex(userId, remotePath) {
+    const state = wizardStates.get(userId);
+    if (!state) return false;
+    
+    try {
+        const settings = getUserSettings(userId);
+        
+        if (!settings.yandexToken) {
+            return false;
+        }
+        
+        // Сначала получаем путь к папке (без имени файла)
+        const lastSlashIndex = remotePath.lastIndexOf('/');
+        const folderPath = remotePath.substring(0, lastSlashIndex);
+        
+        console.log(`Создаем папки по пути: ${folderPath}`);
+        
+        // Создаем все необходимые папки рекурсивно
+        await ensurePath(userId, folderPath);
+        
+        // Теперь получаем ссылку для загрузки файла
+        const uploadData = await yandexRequest(
+            userId, 
+            'GET', 
+            `${RESOURCE_URL}/upload`,
+            { path: remotePath, overwrite: true }
+        );
+        
+        if (!uploadData.href) {
+            throw new Error('Не удалось получить ссылку для загрузки');
+        }
+        
+        // Загружаем файл
+        const fileStream = fs.createReadStream(state.filePathLocal);
+        const uploadUrl = new URL(uploadData.href);
+        
+        return new Promise((resolve, reject) => {
+            const options = {
+                hostname: uploadUrl.hostname,
+                port: 443,
+                path: uploadUrl.pathname + uploadUrl.search,
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/octet-stream'
+                }
+            };
+            
+            const req = https.request(options, (res) => {
+                if (res.statusCode === 201 || res.statusCode === 202) {
+                    resolve(true);
+                } else {
+                    reject(new Error(`Ошибка загрузки: ${res.statusCode}`));
+                }
+            });
+            
+            req.on('error', (error) => {
+                reject(error);
+            });
+            
+            fileStream.pipe(req);
+        });
+        
+    } catch (error) {
+        console.error('Ошибка при загрузке на Яндекс.Диск:', error);
+        return false;
+    }
+}
+
+// Обработчики кнопок визарда
+
+// Категории (Шаг 1)
+bot.action('category_punishments', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const state = wizardStates.get(userId);
+    
+    if (!state) return;
+    
+    // Формируем путь для сохранения
+    const basePath = state.data.basePath || '/TelegramBot';
+    const weekFolder = getCurrentWeekFolder();
+    const isNight = isNightTime();
+    const folderName = isNight ? 'Ночные наказания в игре' : 'Наказания в игре';
+    
+    const remotePath = `${basePath}/${weekFolder}/${folderName}/${state.fileName}`;
+    
+    try {
+        // Сначала создаем папки
+        await ensureWeekFolder(userId, basePath);
+        
+        // Сохраняем на Яндекс.Диск
+        const saved = await savePhotoToYandex(userId, remotePath);
+        
+        if (saved) {
+            await ctx.telegram.editMessageText(
+                state.chatId,
+                state.messageId,
+                null,
+                '✅ **Фото успешно сохранено!**\n\n' +
+                `📁 Категория: ${folderName}\n` +
+                `🗓️ Неделя: ${weekFolder}\n` +
+                `📄 Файл: ${state.fileName}\n\n` +
+                '_Фото сохранено на Яндекс.Диск._',
+                { parse_mode: 'Markdown' }
+            );
+        } else {
+            await ctx.telegram.editMessageText(
+                state.chatId,
+                state.messageId,
+                null,
+                '❌ **Не удалось сохранить фото**\n\n' +
+                'Проверьте настройки Яндекс.Диска (/settings)',
+                { parse_mode: 'Markdown' }
+            );
+        }
+    } catch (error) {
+        console.error('Ошибка при сохранении наказания:', error);
+        await ctx.telegram.editMessageText(
+            state.chatId,
+            state.messageId,
+            null,
+            `❌ **Ошибка при сохранении:**\n${error.message}`,
+            { parse_mode: 'Markdown' }
+        );
+    }
+    
+    // Очищаем состояние визарда
+    wizardStates.delete(userId);
+});
+
+bot.action('category_mp', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const state = wizardStates.get(userId);
+    
+    if (!state) return;
+    
+    const weekFolder = getCurrentWeekFolder();
+    const remotePath = `${state.data.basePath || '/TelegramBot'}/${weekFolder}/МП/${state.fileName}`;
+    
+    const saved = await savePhotoToYandex(userId, remotePath);
+    
+    if (saved) {
+        await ctx.telegram.editMessageText(
+            state.chatId,
+            state.messageId,
+            null,
+            '✅ **Фото успешно сохранено!**\n\n' +
+            `📁 Категория: МП\n` +
+            `🗓️ Неделя: ${weekFolder}\n` +
+            `📄 Файл: ${state.fileName}`,
+            { parse_mode: 'Markdown' }
+        );
+    } else {
+        await ctx.telegram.editMessageText(
+            state.chatId,
+            state.messageId,
+            null,
+            '❌ **Не удалось сохранить фото**',
+            { parse_mode: 'Markdown' }
+        );
+    }
+    
+    wizardStates.delete(userId);
+});
+
+bot.action('category_mp_help', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const state = wizardStates.get(userId);
+    
+    if (!state) return;
+    
+    const weekFolder = getCurrentWeekFolder();
+    const remotePath = `${state.data.basePath || '/TelegramBot'}/${weekFolder}/Помощь в МП/${state.fileName}`;
+    
+    const saved = await savePhotoToYandex(userId, remotePath);
+    
+    if (saved) {
+        await ctx.telegram.editMessageText(
+            state.chatId,
+            state.messageId,
+            null,
+            '✅ **Фото успешно сохранено!**\n\n' +
+            `📁 Категория: Помощь в МП\n` +
+            `🗓️ Неделя: ${weekFolder}\n` +
+            `📄 Файл: ${state.fileName}`,
+            { parse_mode: 'Markdown' }
+        );
+    }
+    
+    wizardStates.delete(userId);
+});
+
+// Переход к событиям
+bot.action('category_events', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const state = wizardStates.get(userId);
+    
+    if (!state) return;
+    
+    await sendStep2(ctx, userId);
+});
+
+// Типы событий (Шаг 2)
+bot.action('event_raids', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    await sendStep3(ctx, userId, 'raids');
+});
+
+bot.action('event_supplies', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    await sendStep3(ctx, userId, 'supplies');
+});
+
+// Этапы событий (Шаг 3)
+bot.action('event_start', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    await saveEventPhoto(ctx, userId, 'start');
+});
+
+bot.action('event_end', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    await saveEventPhoto(ctx, userId, 'end');
+});
+
+// Функция сохранения фото события
+async function saveEventPhoto(ctx, userId, stage) {
+    const state = wizardStates.get(userId);
+    if (!state) return;
+    
+    const basePath = state.data.basePath || '/TelegramBot';
+    const weekFolder = getCurrentWeekFolder();
+    const isNight = isNightTime();
+    const eventNumber = state.data.eventNumber;
+    const eventType = state.data.eventType;
+    
+    // Определяем папку в зависимости от типа события и времени
+    let folderName;
+    if (eventType === 'raids') {
+        folderName = isNight ? 'Ночные налеты, захваты' : 'Налёты, захваты';
+    } else {
+        folderName = isNight ? 'Ночные поставки, ограбления (Краз, Air)' : 'Поставки, ограбления (Краз, Air)';
+    }
+    
+    // Формируем имя файла: номер-этап.jpg
+    const fileExtension = path.extname(state.fileName) || '.jpg';
+    const eventFileName = `${eventNumber}-${stage === 'start' ? '1' : '2'}${fileExtension}`;
+    
+    const remotePath = `${basePath}/${weekFolder}/${folderName}/${eventFileName}`;
+    
+    try {
+        // Сначала убедимся, что созданы все папки
+        await ensureWeekFolder(userId, basePath);
+        
+        // Сохраняем фото
+        const saved = await savePhotoToYandex(userId, remotePath);
+        
+        if (saved) {
+            await ctx.telegram.editMessageText(
+                state.chatId,
+                state.messageId,
+                null,
+                `✅ **Фото события сохранено!**\n\n` +
+                `📁 Категория: ${folderName}\n` +
+                `🗓️ Неделя: ${weekFolder}\n` +
+                `🔢 Событие: #${eventNumber}\n` +
+                `📸 Этап: ${stage === 'start' ? '🚀 Начало' : '🏁 Конец'}\n` +
+                `📄 Файл: ${eventFileName}\n\n` +
+                `${stage === 'start' ? '_Не забудьте отправить фото окончания события_' : '_Событие полностью сохранено_'}`,
+                { parse_mode: 'Markdown' }
+            );
+        } else {
+            await ctx.telegram.editMessageText(
+                state.chatId,
+                state.messageId,
+                null,
+                '❌ **Не удалось сохранить фото события**',
+                { parse_mode: 'Markdown' }
+            );
+        }
+    } catch (error) {
+        console.error('Ошибка при сохранении события:', error);
+        await ctx.telegram.editMessageText(
+            state.chatId,
+            state.messageId,
+            null,
+            `❌ **Ошибка при сохранении:**\n${error.message}\n\nПопробуйте еще раз или обратитесь к администратору.`,
+            { parse_mode: 'Markdown' }
+        );
+    }
+    
+    wizardStates.delete(userId);
+}
+
+// Навигация назад
+bot.action('back_to_step1', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const state = wizardStates.get(userId);
+    
+    if (!state) return;
+    
+    state.step = 1;
+    await sendStep1(ctx, userId);
+});
+
+bot.action('back_to_step2', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const state = wizardStates.get(userId);
+    
+    if (!state) return;
+    
+    state.step = 2;
+    await sendStep2(ctx, userId);
+});
+
+// Отмена визарда
+bot.action('cancel_wizard', async (ctx) => {
+    await ctx.answerCbQuery('Визард отменен');
+    const userId = ctx.from.id;
+    const state = wizardStates.get(userId);
+    
+    if (!state) return;
+    
+    await ctx.telegram.editMessageText(
+        state.chatId,
+        state.messageId,
+        null,
+        '❌ **Сохранение отменено**\n\n' +
+        'Фото не было сохранено на Яндекс.Диск.',
+        { parse_mode: 'Markdown' }
+    );
+    
+    wizardStates.delete(userId);
+});
+
+// Команда для сброса состояния визарда (на всякий случай)
+bot.command('reset_wizard', async (ctx) => {
+    const userId = ctx.from.id;
+    wizardStates.delete(userId);
+    await ctx.reply('✅ Состояние визарда сброшено');
+});
+
+// Модифицируйте команду /settings для установки базового пути
+bot.command('setbasepath', async (ctx) => {
+    const userId = ctx.from.id;
+    const basePath = ctx.message.text.split(' ')[1];
+    
+    if (!basePath) {
+        await ctx.reply('Укажите базовый путь: /setbasepath <путь>\nНапример: /setbasepath /ОтчетыРМРМ');
+        return;
+    }
+    
+    const state = wizardStates.get(userId);
+    if (state) {
+        state.data.basePath = basePath.startsWith('/') ? basePath : `/${basePath}`;
+    }
+    
+    await ctx.reply(`✅ Базовый путь установлен: ${basePath.startsWith('/') ? basePath : '/' + basePath}`);
+});
+
+bot.command('init_folders', async (ctx) => {
+    const userId = ctx.from.id;
+    const settings = getUserSettings(userId);
+    
+    if (!settings.yandexToken) {
+        await ctx.reply('❌ Сначала настройте авторизацию через Яндекс.Диск (/auth)');
+        return;
+    }
+    
+    try {
+        await ctx.reply('🔄 Создаю базовую структуру папок...');
+        
+        const basePath = settings.yandexPath || '/TelegramBot';
+        const weekFolder = getCurrentWeekFolder();
+        
+        // Создаем основные папки
+        const folders = [
+            `${basePath}/${weekFolder}/Наказания в игре`,
+            `${basePath}/${weekFolder}/МП`,
+            `${basePath}/${weekFolder}/Помощь в МП`,
+            `${basePath}/${weekFolder}/Налёты, захваты`,
+            `${basePath}/${weekFolder}/Поставки, ограбления (Краз, Air)`,
+            `${basePath}/${weekFolder}/Ночные наказания в игре`,
+            `${basePath}/${weekFolder}/Ночные налеты, захваты`,
+            `${basePath}/${weekFolder}/Ночные поставки, ограбления (Краз, Air)`
+        ];
+        
+        for (const folder of folders) {
+            try {
+                await ensurePath(userId, folder);
+                console.log(`Создана папка: ${folder}`);
+            } catch (error) {
+                console.error(`Ошибка при создании папки ${folder}:`, error);
+            }
+        }
+        
+        await ctx.reply(`✅ Базовая структура папок создана!\n\nПуть: ${basePath}/${weekFolder}`);
+        
+    } catch (error) {
+        console.error('Ошибка при создании структуры папок:', error);
+        await ctx.reply(`❌ Ошибка при создании папок:\n${error.message}`);
     }
 });
 
