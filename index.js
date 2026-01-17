@@ -553,6 +553,8 @@ bot.on(message('text'), async (ctx) => {
     }
 });
 
+
+
 bot.launch();
 
 // Включение graceful stop
