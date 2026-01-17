@@ -635,10 +635,11 @@ async function sendStep3(ctx, userId, eventType) {
     const state = wizardStates.get(userId);
     if (!state) return;
     
-    // Получаем порядковый номер события для текущей недели
-    const eventNumber = getNextEventNumber();
-    state.data.eventNumber = eventNumber;
     state.data.eventType = eventType;
+    
+    // Проверяем, есть ли незавершенное событие этого типа
+    const key = `${userId}_${eventType}`;
+    const pendingEvent = pendingEvents.get(key);
     
     const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback('🚀 Начало события', 'event_start')],
@@ -647,16 +648,22 @@ async function sendStep3(ctx, userId, eventType) {
         [Markup.button.callback('❌ Отмена', 'cancel_wizard')]
     ]);
     
+    let message = '⚡ **Выберите этап события:**\n\n';
+    
+    if (pendingEvent) {
+        message += `⚠️ У вас есть незавершенное событие #${pendingEvent.eventNumber}\n`;
+        message += `Для его завершения выберите "Конец события"\n\n`;
+    }
+    
+    message += '• 🚀 **Начало** - скриншот начала события\n' +
+              '• 🏁 **Конец** - скриншот окончания события\n\n' +
+              'Формат имени файла: НОМЕР-1 (начало) или НОМЕР-2 (конец)';
+    
     await ctx.telegram.editMessageText(
         state.chatId,
         state.messageId,
         null,
-        `⚡ **Событие #${eventNumber}**\n\n` +
-        `Тип: ${eventType === 'raids' ? '🏰 Налёты, захваты' : '🚚 Поставки, ограбления (Краз, Air)'}\n\n` +
-        '📸 **Выберите этап события:**\n' +
-        '• 🚀 **Начало** - скриншот начала события\n' +
-        '• 🏁 **Конец** - скриншот окончания события\n\n' +
-        `Формат имени файла: ${eventNumber}-1 (начало) или ${eventNumber}-2 (конец)`,
+        message,
         { 
             parse_mode: 'Markdown',
             reply_markup: keyboard.reply_markup 
@@ -734,6 +741,51 @@ async function savePhotoToYandex(userId, remotePath) {
         return false;
     }
 }
+
+// Команда для просмотра незавершенных событий
+bot.command('pending', async (ctx) => {
+    const userId = ctx.from.id;
+    
+    let message = '📋 **Ваши незавершенные события:**\n\n';
+    let hasPending = false;
+    
+    for (const [key, event] of pendingEvents.entries()) {
+        if (key.startsWith(`${userId}_`)) {
+            const eventType = event.eventType === 'raids' ? '🏰 Налёты, захваты' : '🚚 Поставки, ограбления';
+            message += `🔢 #${event.eventNumber} - ${eventType}\n`;
+            const age = Math.round((Date.now() - event.timestamp) / 60000); // в минутах
+            message += `⏱️ Начато ${age} минут назад\n\n`;
+            hasPending = true;
+        }
+    }
+    
+    if (!hasPending) {
+        message = '✅ У вас нет незавершенных событий';
+    } else {
+        message += '_Для завершения события отправьте фото и выберите "Конец события"_';
+    }
+    
+    await ctx.reply(message, { parse_mode: 'Markdown' });
+});
+
+// Команда для очистки незавершенных событий
+bot.command('clear_pending', async (ctx) => {
+    const userId = ctx.from.id;
+    let clearedCount = 0;
+    
+    for (const [key, event] of pendingEvents.entries()) {
+        if (key.startsWith(`${userId}_`)) {
+            pendingEvents.delete(key);
+            clearedCount++;
+        }
+    }
+    
+    if (clearedCount > 0) {
+        await ctx.reply(`✅ Очищено ${clearedCount} незавершенных событий`);
+    } else {
+        await ctx.reply('✅ У вас не было незавершенных событий');
+    }
+});
 
 // Обработчики кнопок визарда
 
@@ -898,6 +950,63 @@ bot.action('event_end', async (ctx) => {
     await saveEventPhoto(ctx, userId, 'end');
 });
 
+// Хранилище незавершенных событий для каждого пользователя
+const pendingEvents = new Map();
+
+// Функция для получения номера события с учетом незавершенных
+function getEventNumber(userId, eventType, isStart = false) {
+    const key = `${userId}_${eventType}`;
+    
+    if (isStart) {
+        // Для начала события - создаем новый номер
+        const weekKey = getWeekKey();
+        let counter = eventCounters.get(weekKey) || 0;
+        counter++;
+        eventCounters.set(weekKey, counter);
+        
+        // Сохраняем как незавершенное событие
+        pendingEvents.set(key, {
+            eventNumber: counter,
+            eventType: eventType,
+            timestamp: Date.now()
+        });
+        
+        return counter;
+    } else {
+        // Для конца события - ищем незавершенное
+        const pending = pendingEvents.get(key);
+        if (pending) {
+            // Используем номер из незавершенного события и удаляем его
+            const eventNumber = pending.eventNumber;
+            pendingEvents.delete(key);
+            return eventNumber;
+        } else {
+            // Если нет незавершенного - создаем новый номер
+            const weekKey = getWeekKey();
+            let counter = eventCounters.get(weekKey) || 0;
+            counter++;
+            eventCounters.set(weekKey, counter);
+            return counter;
+        }
+    }
+}
+
+// Очистка старых незавершенных событий (старше 24 часов)
+function cleanupPendingEvents() {
+    const now = Date.now();
+    const oneDay = 24 * 60 * 60 * 1000;
+    
+    for (const [key, event] of pendingEvents.entries()) {
+        if (now - event.timestamp > oneDay) {
+            pendingEvents.delete(key);
+            console.log(`Удалено устаревшее событие: ${key}`);
+        }
+    }
+}
+
+// Запускаем очистку каждые 30 минут
+setInterval(cleanupPendingEvents, 30 * 60 * 1000);
+
 // Функция сохранения фото события
 async function saveEventPhoto(ctx, userId, stage) {
     const state = wizardStates.get(userId);
@@ -906,7 +1015,6 @@ async function saveEventPhoto(ctx, userId, stage) {
     const basePath = state.data.basePath || '/TelegramBot';
     const weekFolder = getCurrentWeekFolder();
     const isNight = isNightTime();
-    const eventNumber = state.data.eventNumber;
     const eventType = state.data.eventType;
     
     // Определяем папку в зависимости от типа события и времени
@@ -916,6 +1024,10 @@ async function saveEventPhoto(ctx, userId, stage) {
     } else {
         folderName = isNight ? 'Ночные поставки, ограбления (Краз, Air)' : 'Поставки, ограбления (Краз, Air)';
     }
+    
+    // Получаем номер события (true для начала, false для конца)
+    const isStart = stage === 'start';
+    const eventNumber = getEventNumber(userId, eventType, isStart);
     
     // Формируем имя файла: номер-этап.jpg
     const fileExtension = path.extname(state.fileName) || '.jpg';
