@@ -1,4 +1,5 @@
 const { message } = require('telegraf/filters');
+const { Markup } = require('telegraf');
 const { generateFileName } = require('../utils');
 
 class PhotoHandlers {

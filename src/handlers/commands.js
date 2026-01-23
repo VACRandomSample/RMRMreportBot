@@ -37,7 +37,10 @@ class CommandHandlers {
     this.bot.command('quit', this.handleQuit.bind(this));
     
     // Text handler
-    this.bot.on('text', this.handleText.bind(this));
+    // this.bot.on('text', async (ctx, next) => {
+    //   await this.handleText(ctx);
+    //   next();
+    // });
   }
 
   /**
@@ -56,7 +59,7 @@ class CommandHandlers {
       `• Локальные копии автоматически удаляются\n` +
       `• Автоматическая организация по папкам\n\n` +
       `Для начала отправьте мне фото!`,
-      { parse_mode: 'Markdown', reply_markup: startKeyboard }
+      { parse_mode: 'Markdown', reply_markup: startKeyboard.reply_markup }
     );
   }
 
@@ -527,9 +530,10 @@ class CommandHandlers {
    * Handle text messages
    */
   async handleText(ctx) {
-    if (ctx.message.text !== '⚙️ Настройки') {
-      await ctx.reply('Я бот для сохранения фото. Просто отправь мне фото!\nИспользуй /settings для настройки Яндекс.Диска');
+    if (ctx.message.text === '⚙️ Настройки') {
+      return; // Пропустить, чтобы обработал другой хендлер
     }
+    await ctx.reply('Я бот для сохранения фото. Просто отправь мне фото!\nИспользуй /settings для настройки Яндекс.Диска');
   }
 }
 
