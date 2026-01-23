@@ -637,41 +637,166 @@ async function sendStep3(ctx, userId, eventType) {
     
     state.data.eventType = eventType;
     
-    // Проверяем, есть ли незавершенное событие этого типа
-    const key = `${userId}_${eventType}`;
-    const pendingEvent = pendingEvents.get(key);
+    const basePath = state.data.basePath || '/TelegramBot';
+    const weekFolder = getCurrentWeekFolder();
+    const isNight = isNightTime();
     
-    const keyboard = Markup.inlineKeyboard([
-        [Markup.button.callback('🚀 Начало события', 'event_start')],
-        [Markup.button.callback('🏁 Конец события', 'event_end')],
-        [Markup.button.callback('⬅️ Назад', 'back_to_step2')],
-        [Markup.button.callback('❌ Отмена', 'cancel_wizard')]
-    ]);
-    
-    let message = '⚡ **Выберите этап события:**\n\n';
-    
-    if (pendingEvent) {
-        message += `⚠️ У вас есть незавершенное событие #${pendingEvent.eventNumber}\n`;
-        message += `Для его завершения выберите "Конец события"\n\n`;
+    // Определяем папку в зависимости от типа события и времени
+    let folderName;
+    if (eventType === 'raids') {
+        folderName = isNight ? 'Ночные налеты, захваты' : 'Налёты, захваты';
+    } else {
+        folderName = isNight ? 'Ночные поставки, ограбления (Краз, Air)' : 'Поставки, ограбления (Краз, Air)';
     }
     
-    message += '• 🚀 **Начало** - скриншот начала события\n' +
-              '• 🏁 **Конец** - скриншот окончания события\n\n' +
-              'Формат имени файла: НОМЕР-1 (начало) или НОМЕР-2 (конец)';
+    const remoteFolderPath = `${basePath}/${weekFolder}/${folderName}`;
+    const key = `${userId}_${eventType}`;
     
-    await ctx.telegram.editMessageText(
-        state.chatId,
-        state.messageId,
-        null,
-        message,
-        { 
-            parse_mode: 'Markdown',
-            reply_markup: keyboard.reply_markup 
+    try {
+        // Получаем список файлов в папке
+        const files = await listFilesInFolder(userId, remoteFolderPath);
+        const eventNumbers = extractEventNumbers(files);
+        
+        // Находим незавершенные события (есть начало, нет конца)
+        const unfinishedEvents = [];
+        
+        for (const num of eventNumbers) {
+            const hasStart = files.some(f => f.startsWith(`${num}-1.`));
+            const hasEnd = files.some(f => f.startsWith(`${num}-2.`));
+            
+            if (hasStart && !hasEnd) {
+                unfinishedEvents.push(num);
+            }
         }
-    );
+        
+        // Проверяем незавершенные события в памяти
+        const pending = pendingEvents.get(key);
+        
+        const keyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('🚀 Начало события', 'event_start')],
+            [Markup.button.callback('🏁 Конец события', 'event_end')],
+            [Markup.button.callback('⬅️ Назад', 'back_to_step2')],
+            [Markup.button.callback('❌ Отмена', 'cancel_wizard')]
+        ]);
+        
+        let message = '⚡ **Выберите этап события:**\n\n';
+        
+        if (pending) {
+            message += `📋 У вас есть незавершенное событие #${pending.eventNumber}\n`;
+        }
+        
+        if (unfinishedEvents.length > 0) {
+            message += `📁 В папке найдены незавершенные события: ${unfinishedEvents.join(', ')}\n`;
+            message += `Для их завершения выберите "Конец события"\n\n`;
+        }
+        
+        message += '• 🚀 **Начало** - скриншот начала события\n' +
+                  '• 🏁 **Конец** - скриншот окончания события\n\n' +
+                  'Формат имени файла: НОМЕР-1 (начало) или НОМЕР-2 (конец)';
+        
+        await ctx.telegram.editMessageText(
+            state.chatId,
+            state.messageId,
+            null,
+            message,
+            { 
+                parse_mode: 'Markdown',
+                reply_markup: keyboard.reply_markup 
+            }
+        );
+        
+    } catch (error) {
+        console.error('Ошибка при проверке событий:', error);
+        // В случае ошибки показываем стандартное сообщение
+        const keyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('🚀 Начало события', 'event_start')],
+            [Markup.button.callback('🏁 Конец события', 'event_end')],
+            [Markup.button.callback('⬅️ Назад', 'back_to_step2')],
+            [Markup.button.callback('❌ Отмена', 'cancel_wizard')]
+        ]);
+        
+        await ctx.telegram.editMessageText(
+            state.chatId,
+            state.messageId,
+            null,
+            '⚡ **Выберите этап события:**\n\n' +
+            '• 🚀 **Начало** - скриншот начала события\n' +
+            '• 🏁 **Конец** - скриншот окончания события\n\n' +
+            'Формат имени файла: НОМЕР-1 (начало) или НОМЕР-2 (конец)',
+            { 
+                parse_mode: 'Markdown',
+                reply_markup: keyboard.reply_markup 
+            }
+        );
+    }
     
     state.step = 3;
 }
+
+bot.command('sync_events', async (ctx) => {
+    const userId = ctx.from.id;
+    const settings = getUserSettings(userId);
+    
+    if (!settings.yandexToken) {
+        await ctx.reply('❌ Сначала настройте авторизацию через Яндекс.Диск (/auth)');
+        return;
+    }
+    
+    await ctx.reply('🔄 Синхронизирую события с Яндекс.Диском...');
+    
+    const basePath = settings.yandexPath || '/TelegramBot';
+    const weekFolder = getCurrentWeekFolder();
+    const isNight = isNightTime();
+    
+    try {
+        // Проверяем все папки событий
+        const eventTypes = [
+            { name: 'raids', folder: isNight ? 'Ночные налеты, захваты' : 'Налёты, захваты' },
+            { name: 'supplies', folder: isNight ? 'Ночные поставки, ограбления (Краз, Air)' : 'Поставки, ограбления (Краз, Air)' }
+        ];
+        
+        let message = '📋 **Статус событий на Яндекс.Диске:**\n\n';
+        
+        for (const eventType of eventTypes) {
+            const remoteFolderPath = `${basePath}/${weekFolder}/${eventType.folder}`;
+            
+            try {
+                const files = await listFilesInFolder(userId, remoteFolderPath);
+                const eventNumbers = extractEventNumbers(files);
+                
+                // Подсчитываем завершенные и незавершенные
+                let completed = 0;
+                let incomplete = 0;
+                
+                for (const num of eventNumbers) {
+                    const hasStart = files.some(f => f.startsWith(`${num}-1.`));
+                    const hasEnd = files.some(f => f.startsWith(`${num}-2.`));
+                    
+                    if (hasStart && hasEnd) {
+                        completed++;
+                    } else if (hasStart && !hasEnd) {
+                        incomplete++;
+                    }
+                }
+                
+                message += `${eventType.folder}:\n`;
+                message += `  • Всего событий: ${eventNumbers.length}\n`;
+                message += `  • Завершено: ${completed}\n`;
+                message += `  • Не завершено: ${incomplete}\n\n`;
+                
+            } catch (error) {
+                message += `${eventType.folder}:\n`;
+                message += `  • Ошибка: ${error.message}\n\n`;
+            }
+        }
+        
+        await ctx.reply(message, { parse_mode: 'Markdown' });
+        
+    } catch (error) {
+        console.error('Ошибка при синхронизации:', error);
+        await ctx.reply(`❌ Ошибка при синхронизации:\n${error.message}`);
+    }
+});
 
 // Функция сохранения фото на Яндекс.Диск
 async function savePhotoToYandex(userId, remotePath) {
@@ -745,17 +870,53 @@ async function savePhotoToYandex(userId, remotePath) {
 // Команда для просмотра незавершенных событий
 bot.command('pending', async (ctx) => {
     const userId = ctx.from.id;
+    const settings = getUserSettings(userId);
     
     let message = '📋 **Ваши незавершенные события:**\n\n';
     let hasPending = false;
     
+    // Сначала проверяем события в памяти
     for (const [key, event] of pendingEvents.entries()) {
         if (key.startsWith(`${userId}_`)) {
             const eventType = event.eventType === 'raids' ? '🏰 Налёты, захваты' : '🚚 Поставки, ограбления';
-            message += `🔢 #${event.eventNumber} - ${eventType}\n`;
-            const age = Math.round((Date.now() - event.timestamp) / 60000); // в минутах
+            message += `🧠 В памяти: #${event.eventNumber} - ${eventType}\n`;
+            const age = Math.round((Date.now() - event.timestamp) / 60000);
             message += `⏱️ Начато ${age} минут назад\n\n`;
             hasPending = true;
+        }
+    }
+    
+    // Затем проверяем события на Яндекс.Диске
+    if (settings.yandexToken) {
+        const basePath = settings.yandexPath || '/TelegramBot';
+        const weekFolder = getCurrentWeekFolder();
+        const isNight = isNightTime();
+        
+        const eventTypes = [
+            { name: 'raids', display: '🏰 Налёты, захваты', folder: isNight ? 'Ночные налеты, захваты' : 'Налёты, захваты' },
+            { name: 'supplies', display: '🚚 Поставки, ограбления', folder: isNight ? 'Ночные поставки, ограбления (Краз, Air)' : 'Поставки, ограбления (Краз, Air)' }
+        ];
+        
+        for (const eventType of eventTypes) {
+            const remoteFolderPath = `${basePath}/${weekFolder}/${eventType.folder}`;
+            
+            try {
+                const files = await listFilesInFolder(userId, remoteFolderPath);
+                const eventNumbers = extractEventNumbers(files);
+                
+                for (const num of eventNumbers) {
+                    const hasStart = files.some(f => f.startsWith(`${num}-1.`));
+                    const hasEnd = files.some(f => f.startsWith(`${num}-2.`));
+                    
+                    if (hasStart && !hasEnd) {
+                        message += `📁 На диске: #${num} - ${eventType.display}\n`;
+                        message += `📍 Путь: ${remoteFolderPath}\n\n`;
+                        hasPending = true;
+                    }
+                }
+            } catch (error) {
+                // Игнорируем ошибки при доступе к папке
+            }
         }
     }
     
@@ -1007,6 +1168,104 @@ function cleanupPendingEvents() {
 // Запускаем очистку каждые 30 минут
 setInterval(cleanupPendingEvents, 30 * 60 * 1000);
 
+// Функция для получения списка файлов в папке на Яндекс.Диске
+async function listFilesInFolder(userId, folderPath) {
+    const settings = getUserSettings(userId);
+    
+    if (!settings.yandexToken) {
+        throw new Error('OAuth токен не установлен');
+    }
+
+    try {
+        // Пытаемся получить информацию о папке
+        const result = await yandexRequest(
+            userId,
+            'GET',
+            RESOURCE_URL,
+            { 
+                path: folderPath,
+                limit: 1000 // Максимальное количество файлов
+            }
+        );
+
+        // Если папка существует и в ней есть файлы
+        if (result._embedded && result._embedded.items) {
+            return result._embedded.items
+                .filter(item => item.type === 'file')
+                .map(item => item.name);
+        }
+        
+        return []; // Папка пуста
+    } catch (error) {
+        // Если папки не существует (404) или она пуста, возвращаем пустой массив
+        if (error.message.includes('404') || error.message.includes('DiskNotFoundError')) {
+            return [];
+        }
+        throw error;
+    }
+}
+
+// Функция для извлечения номеров событий из имен файлов
+function extractEventNumbers(filenames) {
+    const numbers = [];
+    const pattern = /^(\d+)-[12]\.(jpg|jpeg|png|gif)$/i;
+    
+    for (const filename of filenames) {
+        const match = pattern.exec(filename);
+        if (match) {
+            numbers.push(parseInt(match[1], 10));
+        }
+    }
+    
+    return [...new Set(numbers)]; // Убираем дубликаты
+}
+
+// Обновленная функция для получения следующего номера события
+async function getNextEventNumber(userId, folderPath) {
+    try {
+        // Получаем список файлов в папке
+        const files = await listFilesInFolder(userId, folderPath);
+        
+        // Извлекаем номера событий
+        const eventNumbers = extractEventNumbers(files);
+        
+        if (eventNumbers.length === 0) {
+            return 1; // Если файлов нет, начинаем с 1
+        }
+        
+        // Находим максимальный номер
+        const maxNumber = Math.max(...eventNumbers);
+        return maxNumber + 1;
+    } catch (error) {
+        console.error('Ошибка при получении номера события:', error);
+        // Если не удалось получить список файлов, используем счетчик в памяти
+        const weekKey = getWeekKey();
+        let counter = eventCounters.get(weekKey) || 0;
+        counter++;
+        eventCounters.set(weekKey, counter);
+        return counter;
+    }
+}
+
+// Функция для проверки существования события по номеру
+async function checkEventExists(userId, folderPath, eventNumber) {
+    try {
+        const files = await listFilesInFolder(userId, folderPath);
+        
+        // Проверяем, есть ли файлы с таким номером
+        const startPattern = new RegExp(`^${eventNumber}-1\\.(jpg|jpeg|png|gif)$`, 'i');
+        const endPattern = new RegExp(`^${eventNumber}-2\\.(jpg|jpeg|png|gif)$`, 'i');
+        
+        const hasStart = files.some(file => startPattern.test(file));
+        const hasEnd = files.some(file => endPattern.test(file));
+        
+        return { hasStart, hasEnd };
+    } catch (error) {
+        console.error('Ошибка при проверке события:', error);
+        return { hasStart: false, hasEnd: false };
+    }
+}
+
 // Функция сохранения фото события
 async function saveEventPhoto(ctx, userId, stage) {
     const state = wizardStates.get(userId);
@@ -1025,35 +1284,117 @@ async function saveEventPhoto(ctx, userId, stage) {
         folderName = isNight ? 'Ночные поставки, ограбления (Краз, Air)' : 'Поставки, ограбления (Краз, Air)';
     }
     
-    // Получаем номер события (true для начала, false для конца)
-    const isStart = stage === 'start';
-    const eventNumber = getEventNumber(userId, eventType, isStart);
-    
-    // Формируем имя файла: номер-этап.jpg
-    const fileExtension = path.extname(state.fileName) || '.jpg';
-    const eventFileName = `${eventNumber}-${stage === 'start' ? '1' : '2'}${fileExtension}`;
-    
-    const remotePath = `${basePath}/${weekFolder}/${folderName}/${eventFileName}`;
+    const remoteFolderPath = `${basePath}/${weekFolder}/${folderName}`;
+    const key = `${userId}_${eventType}`;
     
     try {
         // Сначала убедимся, что созданы все папки
         await ensureWeekFolder(userId, basePath);
         
+        let eventNumber;
+        let isExistingEvent = false;
+        
+        if (stage === 'start') {
+            // Для начала события получаем следующий номер
+            eventNumber = await getNextEventNumber(userId, remoteFolderPath);
+            
+            // Проверяем, не существует ли уже событие с таким номером
+            const eventExists = await checkEventExists(userId, remoteFolderPath, eventNumber);
+            
+            if (eventExists.hasStart) {
+                // Если начало уже существует, берем следующий номер
+                eventNumber = eventNumber + 1;
+            }
+            
+            // Сохраняем как незавершенное событие
+            pendingEvents.set(key, {
+                eventNumber: eventNumber,
+                eventType: eventType,
+                timestamp: Date.now(),
+                folderPath: remoteFolderPath
+            });
+            
+        } else if (stage === 'end') {
+            // Для конца события сначала проверяем незавершенные
+            const pending = pendingEvents.get(key);
+            
+            if (pending) {
+                // Используем номер из незавершенного события
+                eventNumber = pending.eventNumber;
+                pendingEvents.delete(key);
+                isExistingEvent = true;
+                
+                // Проверяем, существует ли уже конец для этого события
+                const eventExists = await checkEventExists(userId, remoteFolderPath, eventNumber);
+                
+                if (eventExists.hasEnd) {
+                    // Если конец уже существует, создаем новое событие
+                    await ctx.answerCbQuery('⚠️ Конец события уже сохранен. Создаю новое событие...');
+                    eventNumber = await getNextEventNumber(userId, remoteFolderPath);
+                    isExistingEvent = false;
+                }
+            } else {
+                // Если нет незавершенного, находим событие без конца
+                const files = await listFilesInFolder(userId, remoteFolderPath);
+                const eventNumbers = extractEventNumbers(files);
+                
+                // Ищем события, у которых есть начало (файл с -1), но нет конца (файла с -2)
+                let foundEventNumber = null;
+                
+                for (const num of eventNumbers) {
+                    const startFile = files.find(f => f.startsWith(`${num}-1.`));
+                    const endFile = files.find(f => f.startsWith(`${num}-2.`));
+                    
+                    if (startFile && !endFile) {
+                        foundEventNumber = num;
+                        break;
+                    }
+                }
+                
+                if (foundEventNumber) {
+                    // Нашли незавершенное событие в папке
+                    eventNumber = foundEventNumber;
+                    isExistingEvent = true;
+                } else {
+                    // Не нашли незавершенных событий, создаем новое
+                    eventNumber = await getNextEventNumber(userId, remoteFolderPath);
+                    isExistingEvent = false;
+                    await ctx.answerCbQuery('⚠️ Начало события не найдено. Создаю новое событие...');
+                }
+            }
+        }
+        
+        // Формируем имя файла: номер-этап.jpg
+        const fileExtension = path.extname(state.fileName) || '.jpg';
+        const eventFileName = `${eventNumber}-${stage === 'start' ? '1' : '2'}${fileExtension}`;
+        const remotePath = `${remoteFolderPath}/${eventFileName}`;
+        
         // Сохраняем фото
         const saved = await savePhotoToYandex(userId, remotePath);
         
         if (saved) {
-            await ctx.telegram.editMessageText(
-                state.chatId,
-                state.messageId,
-                null,
-                `✅ **Фото события сохранено!**\n\n` +
+            let message = `✅ **Фото события сохранено!**\n\n` +
                 `📁 Категория: ${folderName}\n` +
                 `🗓️ Неделя: ${weekFolder}\n` +
                 `🔢 Событие: #${eventNumber}\n` +
                 `📸 Этап: ${stage === 'start' ? '🚀 Начало' : '🏁 Конец'}\n` +
-                `📄 Файл: ${eventFileName}\n\n` +
-                `${stage === 'start' ? '_Не забудьте отправить фото окончания события_' : '_Событие полностью сохранено_'}`,
+                `📄 Файл: ${eventFileName}\n\n`;
+            
+            if (stage === 'start') {
+                message += '_Не забудьте отправить фото окончания события_';
+            } else {
+                if (isExistingEvent) {
+                    message += '_✅ Событие полностью сохранено_';
+                } else {
+                    message += '_⚠️ Событие сохранено без начала_';
+                }
+            }
+            
+            await ctx.telegram.editMessageText(
+                state.chatId,
+                state.messageId,
+                null,
+                message,
                 { parse_mode: 'Markdown' }
             );
         } else {
