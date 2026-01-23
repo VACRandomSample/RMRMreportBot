@@ -876,17 +876,14 @@ bot.command('sync_events', async (ctx) => {
 });
 
 // Функция сохранения фото на Яндекс.Диск
-async function savePhotoToYandex(userId, remotePath) {
-    const state = wizardStates.get(userId);
-    if (!state) return false;
+async function savePhotoToYandex(userId, localFilePath, remotePath) {
+    const settings = getUserSettings(userId);
     
+    if (!settings.yandexToken) {
+        return false;
+    }
+
     try {
-        const settings = getUserSettings(userId);
-        
-        if (!settings.yandexToken) {
-            return false;
-        }
-        
         // Сначала получаем путь к папке (без имени файла)
         const lastSlashIndex = remotePath.lastIndexOf('/');
         const folderPath = remotePath.substring(0, lastSlashIndex);
@@ -896,11 +893,56 @@ async function savePhotoToYandex(userId, remotePath) {
         // Создаем все необходимые папки рекурсивно
         await ensurePath(userId, folderPath);
         
-        // Загружаем файл с автоматическим удалением после успеха
-        const uploaded = await uploadToYandexDisk(userId, state.filePathLocal, remotePath);
+        // Получаем ссылку для загрузки
+        const uploadData = await yandexRequest(
+            userId, 
+            'GET', 
+            `${RESOURCE_URL}/upload`,
+            { path: remotePath, overwrite: true }
+        );
+
+        if (!uploadData.href) {
+            throw new Error('Не удалось получить ссылку для загрузки');
+        }
+
+        // Загружаем файл
+        const fileStream = fs.createReadStream(localFilePath);
+        const uploadUrl = new URL(uploadData.href);
         
-        return uploaded;
-        
+        return new Promise((resolve, reject) => {
+            const options = {
+                hostname: uploadUrl.hostname,
+                port: 443,
+                path: uploadUrl.pathname + uploadUrl.search,
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/octet-stream'
+                }
+            };
+
+            const req = https.request(options, (res) => {
+                if (res.statusCode === 201 || res.statusCode === 202) {
+                    // Удаляем локальный файл после успешной загрузки
+                    fs.unlink(localFilePath, (err) => {
+                        if (err) {
+                            console.error('Ошибка при удалении локального файла:', err);
+                        } else {
+                            console.log(`Локальный файл удален: ${localFilePath}`);
+                        }
+                    });
+                    resolve(true);
+                } else {
+                    reject(new Error(`Ошибка загрузки: ${res.statusCode}`));
+                }
+            });
+
+            req.on('error', (error) => {
+                reject(error);
+            });
+
+            fileStream.pipe(req);
+        });
+
     } catch (error) {
         console.error('Ошибка при загрузке на Яндекс.Диск:', error);
         return false;
@@ -1024,8 +1066,10 @@ bot.action('category_punishments', async (ctx) => {
     const isNight = isNightTime();
     const folderName = isNight ? 'Ночные наказания в игре' : 'Наказания в игре';
     
-    // const remotePath = `${basePath}/${weekFolder}/${folderName}/${state.fileName}`;
-    const fileName = path.basename(state.filePathLocal);
+    // Получаем имя файла из пути и создаем новое уникальное имя
+    const timestamp = Date.now();
+    const random = Math.random().toString(36).substring(7);
+    const fileName = `punishment_${timestamp}_${random}.jpg`;
     const remotePath = `${basePath}/${weekFolder}/${folderName}/${fileName}`;
     
     try {
@@ -1033,7 +1077,7 @@ bot.action('category_punishments', async (ctx) => {
         await ensureWeekFolder(userId, basePath);
         
         // Сохраняем на Яндекс.Диск
-        const saved = await savePhotoToYandex(userId, remotePath);
+        const saved = await savePhotoToYandex(userId, state.filePathLocal, remotePath);
         
         if (saved) {
             await ctx.telegram.editMessageText(
@@ -1043,7 +1087,7 @@ bot.action('category_punishments', async (ctx) => {
                 '✅ **Фото успешно сохранено!**\n\n' +
                 `📁 Категория: ${folderName}\n` +
                 `🗓️ Неделя: ${weekFolder}\n` +
-                `📄 Файл: ${state.fileName}\n\n` +
+                `📄 Файл: ${fileName}\n\n` +
                 '_Фото сохранено на Яндекс.Диск._',
                 { parse_mode: 'Markdown' }
             );
@@ -1066,11 +1110,12 @@ bot.action('category_punishments', async (ctx) => {
             `❌ **Ошибка при сохранении:**\n${error.message}`,
             { parse_mode: 'Markdown' }
         );
+    } finally {
+        // Очищаем состояние визарда
+        wizardStates.delete(userId);
     }
-    
-    // Очищаем состояние визарда
-    wizardStates.delete(userId);
 });
+
 
 bot.action('category_mp', async (ctx) => {
     await ctx.answerCbQuery();
@@ -1288,7 +1333,7 @@ async function saveMPPhoto(ctx, userId, stage) {
         const remotePath = `${remoteFolderPath}/${mpFileName}`;
         
         // Сохраняем фото
-        const saved = await savePhotoToYandex(userId, remotePath);
+        const saved = await savePhotoToYandex(userId, state.filePathLocal, remotePath);
         
         if (saved) {
             let message = `✅ **Фото МП сохранено!**\n\n` +
@@ -1349,14 +1394,16 @@ bot.action('category_mp_help', async (ctx) => {
     const basePath = state.data.basePath || '/TelegramBot';
     const weekFolder = getCurrentWeekFolder();
     
-    // Получаем имя файла из пути
-    const fileName = path.basename(state.filePathLocal);
+    // Создаем новое имя файла
+    const timestamp = Date.now();
+    const random = Math.random().toString(36).substring(7);
+    const fileName = `mp_help_${timestamp}_${random}.jpg`;
     const remotePath = `${basePath}/${weekFolder}/Помощь в МП/${fileName}`;
     
     try {
         await ensureWeekFolder(userId, basePath);
         
-        const saved = await savePhotoToYandex(userId, remotePath);
+        const saved = await savePhotoToYandex(userId, state.filePathLocal, remotePath);
         
         if (saved) {
             await ctx.telegram.editMessageText(
@@ -1814,7 +1861,7 @@ async function saveEventPhoto(ctx, userId, stage) {
         const remotePath = `${remoteFolderPath}/${eventFileName}`;
         
         // Сохраняем фото
-        const saved = await savePhotoToYandex(userId, remotePath);
+        const saved = await savePhotoToYandex(userId, state.filePathLocal, remotePath);
         
         if (saved) {
             let message = `✅ **Фото события сохранено!**\n\n` +
