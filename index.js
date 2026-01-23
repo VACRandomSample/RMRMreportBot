@@ -45,7 +45,7 @@ function getUserSettings(userId) {
     if (!userSettings[userId]) {
         userSettings[userId] = {
             yandexToken: null,
-            yandexPath: '/TelegramBot',
+            yandexPath: '/RMRPreport',
             lastActivity: new Date().toISOString()
         };
         saveUserSettings();
@@ -152,9 +152,10 @@ async function yandexRequest(userId, method, apiPath, query = null, fileStream =
     });
 }
 
-async function ensureWeekFolder(userId, basePath) {
+async function ensureWeekFolder(userId, basePath = null) {
+    const actualBasePath = basePath || getBasePath(userId);
     const weekFolder = getCurrentWeekFolder();
-    const fullPath = `${basePath}/${weekFolder}`;
+    const fullPath = `${actualBasePath}/${weekFolder}`;
     
     try {
         await ensurePath(userId, fullPath);
@@ -165,6 +166,7 @@ async function ensureWeekFolder(userId, basePath) {
         throw error;
     }
 }
+
 
 // Функция для загрузки файла на Яндекс.Диск
 async function uploadToYandexDisk(userId, localFilePath, remoteFilePath) {
@@ -427,12 +429,30 @@ bot.command('setpath', async (ctx) => {
         return;
     }
 
-    getUserSettings(userId);
-    userSettings[userId].yandexPath = newPath.startsWith('/') ? newPath : `/${newPath}`;
+    const formattedPath = newPath.startsWith('/') ? newPath : `/${newPath}`;
+    
+    // Обновляем настройки пользователя
+    const settings = getUserSettings(userId);
+    settings.yandexPath = formattedPath;
     saveUserSettings();
+    
+    // Если есть активный визард, обновляем и его basePath
+    const state = wizardStates.get(userId);
+    if (state) {
+        state.data.basePath = formattedPath;
+    }
 
-    await ctx.reply(`✅ Путь сохранения установлен: ${userSettings[userId].yandexPath}`);
+    await ctx.reply(`✅ Путь сохранения установлен: ${formattedPath}`);
 });
+
+function getBasePath(userId, state = null) {
+    if (state && state.data.basePath) {
+        return state.data.basePath;
+    }
+    
+    const settings = getUserSettings(userId);
+    return settings.yandexPath || '/RMRPreport';
+}
 
 // Команда для отображения настроек
 bot.command('settings', async (ctx) => {
@@ -445,15 +465,16 @@ bot.command('settings', async (ctx) => {
         'Не установлен';
     
     await ctx.reply(
-        '⚙️ Ваши настройки:\n\n' +
-        `Токен Яндекс.Диска: ${hasToken}\n` +
+        '⚙️ **Ваши настройки:**\n\n' +
+        `🔑 Токен Яндекс.Диска: ${hasToken}\n` +
         `(${tokenPreview})\n` +
-        `Путь для сохранения: ${settings.yandexPath}\n\n` +
-        'Команды для настройки:\n' +
+        `📁 Путь для сохранения: ${settings.yandexPath}\n\n` +
+        '**Команды для настройки:**\n' +
         '/auth - авторизация в Яндекс.Диске\n' +
         '/setpath <путь> - изменить путь сохранения\n' +
         '/test - проверить соединение с Яндекс.Диском\n' +
-        '/disconnect - отключить Яндекс.Диск'
+        '/disconnect - отключить Яндекс.Диск',
+        { parse_mode: 'Markdown' }
     );
 });
 
@@ -714,7 +735,7 @@ async function sendStep3(ctx, userId, eventType) {
     
     state.data.eventType = eventType;
     
-    const basePath = state.data.basePath || '/TelegramBot';
+    const basePath = state.data.basePath || '/RMRPreport';
     const weekFolder = getCurrentWeekFolder();
     const isNight = isNightTime();
     
@@ -821,7 +842,7 @@ bot.command('sync_events', async (ctx) => {
     
     await ctx.reply('🔄 Синхронизирую события с Яндекс.Диском...');
     
-    const basePath = settings.yandexPath || '/TelegramBot';
+    const basePath = settings.yandexPath || '/RMRPreport';
     const weekFolder = getCurrentWeekFolder();
     const isNight = isNightTime();
     
@@ -990,7 +1011,7 @@ bot.command('pending', async (ctx) => {
     
     // Затем проверяем события на Яндекс.Диске
     if (settings.yandexToken) {
-        const basePath = settings.yandexPath || '/TelegramBot';
+        const basePath = settings.yandexPath || '/RMRPreport';
         const weekFolder = getCurrentWeekFolder();
         const isNight = isNightTime();
         
@@ -1060,13 +1081,13 @@ bot.action('category_punishments', async (ctx) => {
     
     if (!state) return;
     
-    // Формируем путь для сохранения
-    const basePath = state.data.basePath || '/TelegramBot';
+    // Используем функцию getBasePath для получения пути
+    const basePath = getBasePath(userId, state);
     const weekFolder = getCurrentWeekFolder();
     const isNight = isNightTime();
     const folderName = isNight ? 'Ночные наказания в игре' : 'Наказания в игре';
     
-    // Получаем имя файла из пути и создаем новое уникальное имя
+    // Создаем новое имя файла
     const timestamp = Date.now();
     const random = Math.random().toString(36).substring(7);
     const fileName = `punishment_${timestamp}_${random}.jpg`;
@@ -1137,7 +1158,7 @@ async function sendMPStageStep(ctx, userId) {
     const state = wizardStates.get(userId);
     if (!state) return;
     
-    const basePath = state.data.basePath || '/TelegramBot';
+    const basePath = state.data.basePath || '/RMRPreport';
     const weekFolder = getCurrentWeekFolder();
     const remoteFolderPath = `${basePath}/${weekFolder}/МП`;
     const key = `${userId}_mp`;
@@ -1234,7 +1255,7 @@ async function saveMPPhoto(ctx, userId, stage) {
     const state = wizardStates.get(userId);
     if (!state) return;
     
-    const basePath = state.data.basePath || '/TelegramBot';
+    const basePath = getBasePath(userId, state);
     const weekFolder = getCurrentWeekFolder();
     const remoteFolderPath = `${basePath}/${weekFolder}/МП`;
     const key = `${userId}_mp`;
@@ -1391,7 +1412,7 @@ bot.action('category_mp_help', async (ctx) => {
     
     if (!state) return;
     
-    const basePath = state.data.basePath || '/TelegramBot';
+    const basePath = getBasePath(userId, state);
     const weekFolder = getCurrentWeekFolder();
     
     // Создаем новое имя файла
@@ -1600,7 +1621,7 @@ bot.command('pending_mp', async (ctx) => {
     
     // Затем проверяем МП на Яндекс.Диске
     if (settings.yandexToken) {
-        const basePath = settings.yandexPath || '/TelegramBot';
+        const basePath = settings.yandexPath || '/RMRPreport';
         const weekFolder = getCurrentWeekFolder();
         const remoteFolderPath = `${basePath}/${weekFolder}/МП`;
         
@@ -1762,7 +1783,7 @@ async function saveEventPhoto(ctx, userId, stage) {
         return;
     }
     
-    const basePath = state.data.basePath || '/TelegramBot';
+    const basePath = getBasePath(userId, state);
     const weekFolder = getCurrentWeekFolder();
     const isNight = isNightTime();
     const eventType = state.data.eventType;
@@ -1997,7 +2018,7 @@ bot.command('init_folders', async (ctx) => {
     try {
         await ctx.reply('🔄 Создаю базовую структуру папок...');
         
-        const basePath = settings.yandexPath || '/TelegramBot';
+        const basePath = settings.yandexPath || '/RMRPreport';
         const weekFolder = getCurrentWeekFolder();
         
         // Создаем основные папки
