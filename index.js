@@ -54,22 +54,27 @@ function getUserSettings(userId) {
 }
 
 // Функция для скачивания файла через https
-function downloadFile(url, dest) {
+async function downloadAndGetPath(url) {
     return new Promise((resolve, reject) => {
-        const file = fs.createWriteStream(dest);
+        // Создаем уникальное имя файла
+        const timestamp = Date.now();
+        const random = Math.random().toString(36).substring(7);
+        const fileName = `photo_${timestamp}_${random}.jpg`;
+        const filePathLocal = path.join(photosDir, fileName);
+        
+        const file = fs.createWriteStream(filePathLocal);
         https.get(url, (response) => {
             response.pipe(file);
             file.on('finish', () => {
                 file.close();
-                resolve();
+                resolve(filePathLocal);
             });
         }).on('error', (err) => {
-            fs.unlink(dest, () => {});
+            fs.unlink(filePathLocal, () => {});
             reject(err);
         });
     });
 }
-
 // Функция для запросов к Яндекс.Диску
 async function yandexRequest(userId, method, apiPath, query = null, fileStream = null) {
     const settings = getUserSettings(userId);
@@ -199,6 +204,14 @@ async function uploadToYandexDisk(userId, localFilePath, remoteFilePath) {
 
             const req = https.request(options, (res) => {
                 if (res.statusCode === 201 || res.statusCode === 202) {
+                    // Удаляем локальный файл после успешной загрузки
+                    fs.unlink(localFilePath, (err) => {
+                        if (err) {
+                            console.error('Ошибка при удалении локального файла:', err);
+                        } else {
+                            console.log(`Локальный файл удален: ${localFilePath}`);
+                        }
+                    });
                     resolve(true);
                 } else {
                     reject(new Error(`Ошибка загрузки: ${res.statusCode}`));
@@ -453,11 +466,12 @@ bot.start(async (ctx) => {
     await ctx.reply(
         `👋 Привет, ${ctx.from.first_name}!\n\n` +
         `Я бот для сохранения фото на Яндекс.Диск.\n\n` +
-        `📸 Отправь мне фото, и я сохраню его:\n` +
-        `• На моем сервере\n` +
-        `• На твоем Яндекс.Диске (если настроено)\n\n` +
-        `Для настройки Яндекс.Диска используй кнопку ниже или команду /settings`,
-        startKeyboard
+        `📸 **Особенности:**\n` +
+        `• Фото сохраняются только на Яндекс.Диске\n` +
+        `• Локальные копии автоматически удаляются\n` +
+        `• Автоматическая организация по папкам\n\n` +
+        `Для начала отправьте мне фото!`,
+        { parse_mode: 'Markdown', reply_markup: startKeyboard }
     );
 });
 
@@ -531,34 +545,23 @@ bot.on(message('photo'), async (ctx) => {
     const userId = ctx.from.id;
     
     try {
-        // Сохраняем информацию о фото
         const photo = ctx.message.photo[ctx.message.photo.length - 1];
         const fileId = photo.file_id;
         const file = await ctx.telegram.getFile(fileId);
         const filePath = file.file_path;
         
-        // Создаем уникальное имя файла для локального хранения
-        const timestamp = Date.now();
-        const random = Math.random().toString(36).substring(7);
-        const fileName = `photo_${timestamp}_${random}.jpg`;
-        const filePathLocal = path.join(photosDir, fileName);
-        
-        // Скачиваем файл
         const fileUrl = `https://api.telegram.org/file/bot${process.env.TOKEN_BOT}/${filePath}`;
-        await downloadFile(fileUrl, filePathLocal);
+        const filePathLocal = await downloadAndGetPath(fileUrl);
         
-        // Инициализируем состояние визарда
         wizardStates.set(userId, {
             step: 1,
             fileId,
-            fileName,
-            filePathLocal,
+            filePathLocal, // сохраняем путь, а не имя файла
             user: ctx.from,
             caption: ctx.message.caption || '',
             data: {}
         });
         
-        // Отправляем первый шаг визарда
         await sendStep1(ctx, userId);
         
     } catch (error) {
@@ -566,6 +569,79 @@ bot.on(message('photo'), async (ctx) => {
         await ctx.reply('❌ Произошла ошибка при обработке фото');
     }
 });
+
+// Обновленный обработчик для загрузки документа (фото как файл)
+bot.on(message('document'), async (ctx) => {
+    const document = ctx.message.document;
+    
+    // Проверяем, является ли документ изображением
+    if (document.mime_type && document.mime_type.startsWith('image/')) {
+        try {
+            const fileId = document.file_id;
+            const file = await ctx.telegram.getFile(fileId);
+            const filePath = file.file_path;
+            
+            // Определяем расширение файла
+            const ext = path.extname(document.file_name).replace('.', '') || 
+                       document.mime_type.split('/')[1] || 
+                       'jpg';
+            
+            // Скачиваем файл
+            const fileUrl = `https://api.telegram.org/file/bot${process.env.TOKEN_BOT}/${filePath}`;
+            const filePathLocal = await downloadAndGetPath(fileUrl);
+            
+            // Инициализируем состояние визарда
+            const userId = ctx.from.id;
+            wizardStates.set(userId, {
+                step: 1,
+                fileId,
+                filePathLocal,
+                user: ctx.from,
+                caption: ctx.message.caption || '',
+                data: {}
+            });
+            
+            // Отправляем первый шаг визарда
+            await sendStep1(ctx, userId);
+            
+        } catch (error) {
+            console.error('Ошибка при сохранении фото-документа:', error);
+            await ctx.reply('❌ Произошла ошибка при сохранении фото-документа');
+        }
+    }
+});
+
+// Добавьте периодическую очистку старых файлов
+setInterval(async () => {
+    try {
+        if (fs.existsSync(photosDir)) {
+            const files = fs.readdirSync(photosDir)
+                .filter(file => file !== 'photo_info.json' && !file.startsWith('.'));
+            
+            const oneHourAgo = Date.now() - (60 * 60 * 1000);
+            let deletedCount = 0;
+            
+            for (const file of files) {
+                const filePath = path.join(photosDir, file);
+                try {
+                    const stats = fs.statSync(filePath);
+                    if (stats.mtimeMs < oneHourAgo) {
+                        await safeDeleteFile(filePath);
+                        deletedCount++;
+                    }
+                } catch (error) {
+                    console.error('Ошибка при проверке файла:', error);
+                }
+            }
+            
+            if (deletedCount > 0) {
+                console.log(`Автоматическая очистка: удалено ${deletedCount} файлов`);
+            }
+        }
+    } catch (error) {
+        console.error('Ошибка при автоматической очистке:', error);
+    }
+}, 30 * 60 * 1000); // Каждые 30 минут
 
 // Шаг 1: Выбор категории
 async function sendStep1(ctx, userId) {
@@ -820,52 +896,35 @@ async function savePhotoToYandex(userId, remotePath) {
         // Создаем все необходимые папки рекурсивно
         await ensurePath(userId, folderPath);
         
-        // Теперь получаем ссылку для загрузки файла
-        const uploadData = await yandexRequest(
-            userId, 
-            'GET', 
-            `${RESOURCE_URL}/upload`,
-            { path: remotePath, overwrite: true }
-        );
+        // Загружаем файл с автоматическим удалением после успеха
+        const uploaded = await uploadToYandexDisk(userId, state.filePathLocal, remotePath);
         
-        if (!uploadData.href) {
-            throw new Error('Не удалось получить ссылку для загрузки');
-        }
-        
-        // Загружаем файл
-        const fileStream = fs.createReadStream(state.filePathLocal);
-        const uploadUrl = new URL(uploadData.href);
-        
-        return new Promise((resolve, reject) => {
-            const options = {
-                hostname: uploadUrl.hostname,
-                port: 443,
-                path: uploadUrl.pathname + uploadUrl.search,
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/octet-stream'
-                }
-            };
-            
-            const req = https.request(options, (res) => {
-                if (res.statusCode === 201 || res.statusCode === 202) {
-                    resolve(true);
-                } else {
-                    reject(new Error(`Ошибка загрузки: ${res.statusCode}`));
-                }
-            });
-            
-            req.on('error', (error) => {
-                reject(error);
-            });
-            
-            fileStream.pipe(req);
-        });
+        return uploaded;
         
     } catch (error) {
         console.error('Ошибка при загрузке на Яндекс.Диск:', error);
         return false;
     }
+}
+
+// Функция для безопасного удаления файла
+function safeDeleteFile(filePath) {
+    return new Promise((resolve) => {
+        if (!filePath || !fs.existsSync(filePath)) {
+            resolve(true);
+            return;
+        }
+        
+        fs.unlink(filePath, (err) => {
+            if (err) {
+                console.error('Ошибка при удалении файла:', err);
+                resolve(false);
+            } else {
+                console.log(`Файл удален: ${filePath}`);
+                resolve(true);
+            }
+        });
+    });
 }
 
 // Команда для просмотра незавершенных событий
@@ -965,7 +1024,9 @@ bot.action('category_punishments', async (ctx) => {
     const isNight = isNightTime();
     const folderName = isNight ? 'Ночные наказания в игре' : 'Наказания в игре';
     
-    const remotePath = `${basePath}/${weekFolder}/${folderName}/${state.fileName}`;
+    // const remotePath = `${basePath}/${weekFolder}/${folderName}/${state.fileName}`;
+    const fileName = path.basename(state.filePathLocal);
+    const remotePath = `${basePath}/${weekFolder}/${folderName}/${fileName}`;
     
     try {
         // Сначала создаем папки
@@ -1221,8 +1282,8 @@ async function saveMPPhoto(ctx, userId, stage) {
             }
         }
         
-        // Формируем имя файла: номер-этап.jpg
-        const fileExtension = path.extname(state.fileName) || '.jpg';
+        // Используем filePathLocal для получения расширения файла
+        const fileExtension = path.extname(state.filePathLocal) || '.jpg';
         const mpFileName = `${mpNumber}-${stage === 'start' ? '1' : '2'}${fileExtension}`;
         const remotePath = `${remoteFolderPath}/${mpFileName}`;
         
@@ -1272,9 +1333,10 @@ async function saveMPPhoto(ctx, userId, stage) {
             `❌ **Ошибка при сохранении:**\n${error.message}\n\nПопробуйте еще раз или обратитесь к администратору.`,
             { parse_mode: 'Markdown' }
         );
+    } finally {
+        // Всегда очищаем состояние визарда
+        wizardStates.delete(userId);
     }
-    
-    wizardStates.delete(userId);
 }
 
 bot.action('category_mp_help', async (ctx) => {
@@ -1284,25 +1346,50 @@ bot.action('category_mp_help', async (ctx) => {
     
     if (!state) return;
     
+    const basePath = state.data.basePath || '/TelegramBot';
     const weekFolder = getCurrentWeekFolder();
-    const remotePath = `${state.data.basePath || '/TelegramBot'}/${weekFolder}/Помощь в МП/${state.fileName}`;
     
-    const saved = await savePhotoToYandex(userId, remotePath);
+    // Получаем имя файла из пути
+    const fileName = path.basename(state.filePathLocal);
+    const remotePath = `${basePath}/${weekFolder}/Помощь в МП/${fileName}`;
     
-    if (saved) {
+    try {
+        await ensureWeekFolder(userId, basePath);
+        
+        const saved = await savePhotoToYandex(userId, remotePath);
+        
+        if (saved) {
+            await ctx.telegram.editMessageText(
+                state.chatId,
+                state.messageId,
+                null,
+                `✅ **Фото успешно сохранено!**\n\n` +
+                `📁 Категория: Помощь в МП\n` +
+                `🗓️ Неделя: ${weekFolder}\n` +
+                `📄 Файл: ${fileName}`,
+                { parse_mode: 'Markdown' }
+            );
+        } else {
+            await ctx.telegram.editMessageText(
+                state.chatId,
+                state.messageId,
+                null,
+                '❌ **Не удалось сохранить фото**',
+                { parse_mode: 'Markdown' }
+            );
+        }
+    } catch (error) {
+        console.error('Ошибка при сохранении помощи в МП:', error);
         await ctx.telegram.editMessageText(
             state.chatId,
             state.messageId,
             null,
-            '✅ **Фото успешно сохранено!**\n\n' +
-            `📁 Категория: Помощь в МП\n` +
-            `🗓️ Неделя: ${weekFolder}\n` +
-            `📄 Файл: ${state.fileName}`,
+            `❌ **Ошибка при сохранении:**\n${error.message}`,
             { parse_mode: 'Markdown' }
         );
+    } finally {
+        wizardStates.delete(userId);
     }
-    
-    wizardStates.delete(userId);
 });
 
 // Переход к событиям
@@ -1623,7 +1710,10 @@ async function checkEventExists(userId, folderPath, eventNumber) {
 // Функция сохранения фото события
 async function saveEventPhoto(ctx, userId, stage) {
     const state = wizardStates.get(userId);
-    if (!state) return;
+    if (!state || !state.filePathLocal) {
+        console.error('Состояние визарда или filePathLocal не найдены');
+        return;
+    }
     
     const basePath = state.data.basePath || '/TelegramBot';
     const weekFolder = getCurrentWeekFolder();
@@ -1688,7 +1778,7 @@ async function saveEventPhoto(ctx, userId, stage) {
                     isExistingEvent = false;
                 }
             } else {
-                // Если нет незавершенного, находим событие без конца
+                // Если нет незавершенного, находим событие без конца в папке
                 const files = await listFilesInFolder(userId, remoteFolderPath);
                 const eventNumbers = extractEventNumbers(files);
                 
@@ -1718,8 +1808,8 @@ async function saveEventPhoto(ctx, userId, stage) {
             }
         }
         
-        // Формируем имя файла: номер-этап.jpg
-        const fileExtension = path.extname(state.fileName) || '.jpg';
+        // Используем filePathLocal для получения расширения файла
+        const fileExtension = path.extname(state.filePathLocal) || '.jpg';
         const eventFileName = `${eventNumber}-${stage === 'start' ? '1' : '2'}${fileExtension}`;
         const remotePath = `${remoteFolderPath}/${eventFileName}`;
         
@@ -1769,9 +1859,10 @@ async function saveEventPhoto(ctx, userId, stage) {
             `❌ **Ошибка при сохранении:**\n${error.message}\n\nПопробуйте еще раз или обратитесь к администратору.`,
             { parse_mode: 'Markdown' }
         );
+    } finally {
+        // Всегда очищаем состояние визарда
+        wizardStates.delete(userId);
     }
-    
-    wizardStates.delete(userId);
 }
 
 // Навигация назад
@@ -1804,6 +1895,11 @@ bot.action('cancel_wizard', async (ctx) => {
     const state = wizardStates.get(userId);
     
     if (!state) return;
+    
+    // Удаляем локальный файл
+    if (state.filePathLocal && fs.existsSync(state.filePathLocal)) {
+        await safeDeleteFile(state.filePathLocal);
+    }
     
     await ctx.telegram.editMessageText(
         state.chatId,
@@ -1932,6 +2028,35 @@ bot.command('list_photos', async (ctx) => {
     } catch (error) {
         console.error('Ошибка при получении списка фото:', error);
         await ctx.reply('❌ Ошибка при получении списка фото');
+    }
+});
+
+// Команда для очистки старых файлов
+bot.command('cleanup', async (ctx) => {
+    try {
+        // Получаем список файлов в папке photos
+        const files = fs.readdirSync(photosDir)
+            .filter(file => file !== 'photo_info.json' && !file.startsWith('.'));
+        
+        let deletedCount = 0;
+        const oneHourAgo = Date.now() - (60 * 60 * 1000); // 1 час назад
+        
+        for (const file of files) {
+            const filePath = path.join(photosDir, file);
+            const stats = fs.statSync(filePath);
+            
+            // Удаляем файлы старше 1 часа
+            if (stats.mtimeMs < oneHourAgo) {
+                await safeDeleteFile(filePath);
+                deletedCount++;
+            }
+        }
+        
+        await ctx.reply(`✅ Очистка завершена. Удалено файлов: ${deletedCount}`);
+        
+    } catch (error) {
+        console.error('Ошибка при очистке:', error);
+        await ctx.reply('❌ Ошибка при очистке файлов');
     }
 });
 
