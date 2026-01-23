@@ -582,10 +582,10 @@ async function sendStep1(ctx, userId) {
     
     const message = await ctx.reply(
         '📸 **Куда сохранить фото?**\n\n' +
-        '1. 🎮 **Наказания в игре** - отчеты о выданных наказаниях\n' +
-        '2. 📋 **МП** - отчеты о проведенных мероприятиях (админы 3+ уровня)\n' +
-        '3. 🤝 **Помощь в МП** - отчеты о помощи в проведении\n' +
-        '4. ⚡ **События** - отчеты о слежке за событиями\n\n' +
+        '1. 🎮 **Наказания в игре** - отчеты о выданных наказаниях (1 скриншот)\n' +
+        '2. 📋 **МП** - отчеты о проведенных мероприятиях (2 скриншота: начало и конец)\n' +
+        '3. 🤝 **Помощь в МП** - отчеты о помощи в проведении (1 скриншот)\n' +
+        '4. ⚡ **События** - отчеты о слежке за событиями (2 скриншота: начало и конец)\n\n' +
         '_Выберите категорию:_',
         { 
             parse_mode: 'Markdown',
@@ -596,6 +596,7 @@ async function sendStep1(ctx, userId) {
     // Сохраняем ID сообщения для редактирования
     state.messageId = message.message_id;
     state.chatId = ctx.chat.id;
+    state.step = 1;
 }
 
 // Шаг 2: Для событий - выбор типа события
@@ -1017,34 +1018,264 @@ bot.action('category_mp', async (ctx) => {
     
     if (!state) return;
     
+    // Устанавливаем шаг 2 для МП
+    state.step = 'mp_stage';
+    state.data.category = 'mp';
+    
+    // Отправляем шаг 2: выбор этапа МП
+    await sendMPStageStep(ctx, userId);
+});
+
+// Шаг 2 для МП: выбор этапа мероприятия
+async function sendMPStageStep(ctx, userId) {
+    const state = wizardStates.get(userId);
+    if (!state) return;
+    
+    const basePath = state.data.basePath || '/TelegramBot';
     const weekFolder = getCurrentWeekFolder();
-    const remotePath = `${state.data.basePath || '/TelegramBot'}/${weekFolder}/МП/${state.fileName}`;
+    const remoteFolderPath = `${basePath}/${weekFolder}/МП`;
+    const key = `${userId}_mp`;
     
-    const saved = await savePhotoToYandex(userId, remotePath);
-    
-    if (saved) {
+    try {
+        // Получаем список файлов в папке МП
+        const files = await listFilesInFolder(userId, remoteFolderPath);
+        const mpNumbers = [];
+        const pattern = /^(\d+)-[12]\.(jpg|jpeg|png|gif)$/i;
+        
+        for (const filename of files) {
+            const match = pattern.exec(filename);
+            if (match) {
+                mpNumbers.push(parseInt(match[1], 10));
+            }
+        }
+        
+        // Находим незавершенные МП (есть начало, нет конца)
+        const unfinishedMPs = [];
+        
+        for (const num of mpNumbers) {
+            const hasStart = files.some(f => f.startsWith(`${num}-1.`));
+            const hasEnd = files.some(f => f.startsWith(`${num}-2.`));
+            
+            if (hasStart && !hasEnd) {
+                unfinishedMPs.push(num);
+            }
+        }
+        
+        // Проверяем незавершенные МП в памяти
+        const pending = pendingMPEvents.get(key);
+        
+        const keyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('🚀 Начало МП', 'mp_start')],
+            [Markup.button.callback('🏁 Конец МП', 'mp_end')],
+            [Markup.button.callback('⬅️ Назад', 'back_to_step1')],
+            [Markup.button.callback('❌ Отмена', 'cancel_wizard')]
+        ]);
+        
+        let message = '📋 **Выберите этап мероприятия (МП):**\n\n';
+        
+        if (pending) {
+            message += `📋 У вас есть незавершенное мероприятие #${pending.mpNumber}\n`;
+        }
+        
+        if (unfinishedMPs.length > 0) {
+            message += `📁 В папке найдены незавершенные МП: ${unfinishedMPs.join(', ')}\n`;
+            message += `Для их завершения выберите "Конец МП"\n\n`;
+        }
+        
+        message += '• 🚀 **Начало МП** - скриншот начала мероприятия\n' +
+                  '• 🏁 **Конец МП** - скриншот окончания мероприятия\n\n' +
+                  'Формат имени файла: НОМЕР-1 (начало) или НОМЕР-2 (конец)';
+        
         await ctx.telegram.editMessageText(
             state.chatId,
             state.messageId,
             null,
-            '✅ **Фото успешно сохранено!**\n\n' +
-            `📁 Категория: МП\n` +
-            `🗓️ Неделя: ${weekFolder}\n` +
-            `📄 Файл: ${state.fileName}`,
-            { parse_mode: 'Markdown' }
+            message,
+            { 
+                parse_mode: 'Markdown',
+                reply_markup: keyboard.reply_markup 
+            }
         );
-    } else {
+        
+    } catch (error) {
+        console.error('Ошибка при проверке МП:', error);
+        // В случае ошибки показываем стандартное сообщение
+        const keyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('🚀 Начало МП', 'mp_start')],
+            [Markup.button.callback('🏁 Конец МП', 'mp_end')],
+            [Markup.button.callback('⬅️ Назад', 'back_to_step1')],
+            [Markup.button.callback('❌ Отмена', 'cancel_wizard')]
+        ]);
+        
         await ctx.telegram.editMessageText(
             state.chatId,
             state.messageId,
             null,
-            '❌ **Не удалось сохранить фото**',
+            '📋 **Выберите этап мероприятия (МП):**\n\n' +
+            '• 🚀 **Начало МП** - скриншот начала мероприятия\n' +
+            '• 🏁 **Конец МП** - скриншот окончания мероприятия\n\n' +
+            'Формат имени файла: НОМЕР-1 (начало) или НОМЕР-2 (конец)',
+            { 
+                parse_mode: 'Markdown',
+                reply_markup: keyboard.reply_markup 
+            }
+        );
+    }
+}
+
+// Функция для сохранения фото МП
+async function saveMPPhoto(ctx, userId, stage) {
+    const state = wizardStates.get(userId);
+    if (!state) return;
+    
+    const basePath = state.data.basePath || '/TelegramBot';
+    const weekFolder = getCurrentWeekFolder();
+    const remoteFolderPath = `${basePath}/${weekFolder}/МП`;
+    const key = `${userId}_mp`;
+    
+    try {
+        // Сначала убедимся, что созданы все папки
+        await ensureWeekFolder(userId, basePath);
+        
+        let mpNumber;
+        let isExistingMP = false;
+        
+        if (stage === 'start') {
+            // Для начала МП получаем следующий номер
+            mpNumber = await getNextMPNumber(userId, remoteFolderPath);
+            
+            // Проверяем, не существует ли уже начало МП с таким номером
+            const startPattern = new RegExp(`^${mpNumber}-1\\.(jpg|jpeg|png|gif)$`, 'i');
+            const files = await listFilesInFolder(userId, remoteFolderPath);
+            const hasStart = files.some(file => startPattern.test(file));
+            
+            if (hasStart) {
+                // Если начало уже существует, берем следующий номер
+                mpNumber = mpNumber + 1;
+            }
+            
+            // Сохраняем как незавершенное МП
+            pendingMPEvents.set(key, {
+                mpNumber: mpNumber,
+                timestamp: Date.now(),
+                folderPath: remoteFolderPath
+            });
+            
+        } else if (stage === 'end') {
+            // Для конца МП сначала проверяем незавершенные в памяти
+            const pending = pendingMPEvents.get(key);
+            
+            if (pending) {
+                // Используем номер из незавершенного МП
+                mpNumber = pending.mpNumber;
+                pendingMPEvents.delete(key);
+                isExistingMP = true;
+                
+                // Проверяем, существует ли уже конец для этого МП
+                const endPattern = new RegExp(`^${mpNumber}-2\\.(jpg|jpeg|png|gif)$`, 'i');
+                const files = await listFilesInFolder(userId, remoteFolderPath);
+                const hasEnd = files.some(file => endPattern.test(file));
+                
+                if (hasEnd) {
+                    // Если конец уже существует, создаем новое МП
+                    await ctx.answerCbQuery('⚠️ Конец МП уже сохранен. Создаю новое мероприятие...');
+                    mpNumber = await getNextMPNumber(userId, remoteFolderPath);
+                    isExistingMP = false;
+                }
+            } else {
+                // Если нет незавершенного в памяти, находим МП без конца в папке
+                const files = await listFilesInFolder(userId, remoteFolderPath);
+                const mpNumbers = [];
+                const pattern = /^(\d+)-[12]\.(jpg|jpeg|png|gif)$/i;
+                
+                for (const filename of files) {
+                    const match = pattern.exec(filename);
+                    if (match) {
+                        mpNumbers.push(parseInt(match[1], 10));
+                    }
+                }
+                
+                // Ищем МП, у которых есть начало (файл с -1), но нет конца (файла с -2)
+                let foundMPNumber = null;
+                
+                for (const num of mpNumbers) {
+                    const startFile = files.find(f => f.startsWith(`${num}-1.`));
+                    const endFile = files.find(f => f.startsWith(`${num}-2.`));
+                    
+                    if (startFile && !endFile) {
+                        foundMPNumber = num;
+                        break;
+                    }
+                }
+                
+                if (foundMPNumber) {
+                    // Нашли незавершенное МП в папке
+                    mpNumber = foundMPNumber;
+                    isExistingMP = true;
+                } else {
+                    // Не нашли незавершенных МП, создаем новое
+                    mpNumber = await getNextMPNumber(userId, remoteFolderPath);
+                    isExistingMP = false;
+                    await ctx.answerCbQuery('⚠️ Начало МП не найдено. Создаю новое мероприятие...');
+                }
+            }
+        }
+        
+        // Формируем имя файла: номер-этап.jpg
+        const fileExtension = path.extname(state.fileName) || '.jpg';
+        const mpFileName = `${mpNumber}-${stage === 'start' ? '1' : '2'}${fileExtension}`;
+        const remotePath = `${remoteFolderPath}/${mpFileName}`;
+        
+        // Сохраняем фото
+        const saved = await savePhotoToYandex(userId, remotePath);
+        
+        if (saved) {
+            let message = `✅ **Фото МП сохранено!**\n\n` +
+                `📁 Категория: МП\n` +
+                `🗓️ Неделя: ${weekFolder}\n` +
+                `🔢 Мероприятие: #${mpNumber}\n` +
+                `📸 Этап: ${stage === 'start' ? '🚀 Начало' : '🏁 Конец'}\n` +
+                `📄 Файл: ${mpFileName}\n\n`;
+            
+            if (stage === 'start') {
+                message += '_Не забудьте отправить фото окончания мероприятия_';
+            } else {
+                if (isExistingMP) {
+                    message += '_✅ Мероприятие полностью сохранено_';
+                } else {
+                    message += '_⚠️ Мероприятие сохранено без начала_';
+                }
+            }
+            
+            await ctx.telegram.editMessageText(
+                state.chatId,
+                state.messageId,
+                null,
+                message,
+                { parse_mode: 'Markdown' }
+            );
+        } else {
+            await ctx.telegram.editMessageText(
+                state.chatId,
+                state.messageId,
+                null,
+                '❌ **Не удалось сохранить фото МП**',
+                { parse_mode: 'Markdown' }
+            );
+        }
+    } catch (error) {
+        console.error('Ошибка при сохранении МП:', error);
+        await ctx.telegram.editMessageText(
+            state.chatId,
+            state.messageId,
+            null,
+            `❌ **Ошибка при сохранении:**\n${error.message}\n\nПопробуйте еще раз или обратитесь к администратору.`,
             { parse_mode: 'Markdown' }
         );
     }
     
     wizardStates.delete(userId);
-});
+}
 
 bot.action('category_mp_help', async (ctx) => {
     await ctx.answerCbQuery();
@@ -1113,6 +1344,7 @@ bot.action('event_end', async (ctx) => {
 
 // Хранилище незавершенных событий для каждого пользователя
 const pendingEvents = new Map();
+const pendingMPEvents = new Map();
 
 // Функция для получения номера события с учетом незавершенных
 function getEventNumber(userId, eventType, isStart = false) {
@@ -1151,6 +1383,128 @@ function getEventNumber(userId, eventType, isStart = false) {
         }
     }
 }
+
+// Функция для получения следующего номера МП в папке
+async function getNextMPNumber(userId, folderPath) {
+    try {
+        // Получаем список файлов в папке МП
+        const files = await listFilesInFolder(userId, folderPath);
+        
+        // Извлекаем номера МП (формат: число-число.jpg)
+        const mpNumbers = [];
+        const pattern = /^(\d+)-[12]\.(jpg|jpeg|png|gif)$/i;
+        
+        for (const filename of files) {
+            const match = pattern.exec(filename);
+            if (match) {
+                mpNumbers.push(parseInt(match[1], 10));
+            }
+        }
+        
+        if (mpNumbers.length === 0) {
+            return 1; // Если файлов нет, начинаем с 1
+        }
+        
+        // Находим максимальный номер
+        const maxNumber = Math.max(...mpNumbers);
+        return maxNumber + 1;
+    } catch (error) {
+        console.error('Ошибка при получении номера МП:', error);
+        // Если не удалось получить список файлов, используем счетчик в памяти
+        const weekKey = getWeekKey();
+        let counter = mpCounters.get(weekKey) || 0;
+        counter++;
+        mpCounters.get(weekKey, counter);
+        return counter;
+    }
+}
+
+bot.action('mp_start', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    await saveMPPhoto(ctx, userId, 'start');
+});
+
+bot.action('mp_end', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    await saveMPPhoto(ctx, userId, 'end');
+});
+
+// Функция очистки старых незавершенных МП
+function cleanupPendingMPEvents() {
+    const now = Date.now();
+    const oneDay = 24 * 60 * 60 * 1000;
+    
+    for (const [key, mp] of pendingMPEvents.entries()) {
+        if (now - mp.timestamp > oneDay) {
+            pendingMPEvents.delete(key);
+            console.log(`Удалено устаревшее МП: ${key}`);
+        }
+    }
+}
+
+// Запускаем очистку каждые 30 минут
+setInterval(cleanupPendingMPEvents, 30 * 60 * 1000);
+
+bot.command('pending_mp', async (ctx) => {
+    const userId = ctx.from.id;
+    const settings = getUserSettings(userId);
+    
+    let message = '📋 **Ваши незавершенные мероприятия (МП):**\n\n';
+    let hasPending = false;
+    
+    // Сначала проверяем МП в памяти
+    for (const [key, mp] of pendingMPEvents.entries()) {
+        if (key.startsWith(`${userId}_`)) {
+            message += `🧠 В памяти: #${mp.mpNumber} - МП\n`;
+            const age = Math.round((Date.now() - mp.timestamp) / 60000);
+            message += `⏱️ Начато ${age} минут назад\n\n`;
+            hasPending = true;
+        }
+    }
+    
+    // Затем проверяем МП на Яндекс.Диске
+    if (settings.yandexToken) {
+        const basePath = settings.yandexPath || '/TelegramBot';
+        const weekFolder = getCurrentWeekFolder();
+        const remoteFolderPath = `${basePath}/${weekFolder}/МП`;
+        
+        try {
+            const files = await listFilesInFolder(userId, remoteFolderPath);
+            const mpNumbers = [];
+            const pattern = /^(\d+)-[12]\.(jpg|jpeg|png|gif)$/i;
+            
+            for (const filename of files) {
+                const match = pattern.exec(filename);
+                if (match) {
+                    mpNumbers.push(parseInt(match[1], 10));
+                }
+            }
+            
+            for (const num of mpNumbers) {
+                const hasStart = files.some(f => f.startsWith(`${num}-1.`));
+                const hasEnd = files.some(f => f.startsWith(`${num}-2.`));
+                
+                if (hasStart && !hasEnd) {
+                    message += `📁 На диске: #${num} - МП\n`;
+                    message += `📍 Путь: ${remoteFolderPath}\n\n`;
+                    hasPending = true;
+                }
+            }
+        } catch (error) {
+            // Игнорируем ошибки при доступе к папке
+        }
+    }
+    
+    if (!hasPending) {
+        message = '✅ У вас нет незавершенных мероприятий (МП)';
+    } else {
+        message += '_Для завершения мероприятия отправьте фото и выберите "Конец МП"_';
+    }
+    
+    await ctx.reply(message, { parse_mode: 'Markdown' });
+});
 
 // Очистка старых незавершенных событий (старше 24 часов)
 function cleanupPendingEvents() {
