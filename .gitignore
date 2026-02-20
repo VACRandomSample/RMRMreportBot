@@ -1,5 +1,56 @@
-node_modules/*
+# Зависимости
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
 
+# Сборка и временные файлы
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# Логи и метрики
+*.log
+*.pid
+*.seed
+*.pid.lock
+
+# Переменные окружения (чувствительные данные)
 .env
+.env.local
+.env.*.local
 
+# Директории с кэшем и временными файлами
+.cache/
+.temp/
+tmp/
+
+# Тестовое покрытие
+coverage/
+.nyc_output/
+
+# Редакторы и IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS метаданные
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Файлы, создаваемые при сборке пакетов (например, npm pack)
+*.tgz
+
+# Директории для документации
+docs/
 photos/*
