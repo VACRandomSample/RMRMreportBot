@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compileOnSave": false,
+  "files": [],
+  "references": [
+    {
+      "path": "./apps/bot/telegram-e2e"
+    },
+    {
+      "path": "./apps/bot/telegram"
+    },
+    {
+      "path": "./libs/database"
+    }
+  ]
+}
