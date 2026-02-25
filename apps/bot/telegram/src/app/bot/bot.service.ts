@@ -1,23 +1,10 @@
 import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Telegraf } from 'telegraf';
 import { TELEGRAM_BOT } from './bot.constants';
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const FileManager = require('./legacy/modules/fileManager');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const YandexDisk = require('./legacy/modules/yandexDisk');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const StateManager = require('./legacy/modules/stateManager');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const EventManager = require('./legacy/modules/eventManager');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const CommandHandlers = require('./legacy/handlers/commands');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const CallbackHandlers = require('./legacy/handlers/callbacks');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const PhotoHandlers = require('./legacy/handlers/photos');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const config = require('./legacy/config');
+import { botConfig as config, FileManager, YandexDisk, StateManager, EventManager } from '@org/core';
+import CommandHandlers from './handlers/command.handler';
+import CallbackHandlers from './handlers/callback.handler';
+import PhotoHandlers from './handlers/photo.handler';
 
 @Injectable()
 export class BotService implements OnModuleInit, OnModuleDestroy {
@@ -48,7 +35,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       this.eventManager,
     );
 
-    new CallbackHandlers(
+    const callbackHandlers = new CallbackHandlers(
       this.bot,
       this.fileManager,
       this.yandexDisk,
@@ -56,7 +43,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       this.eventManager,
     );
 
-    new PhotoHandlers(this.bot, this.fileManager, this.stateManager);
+    new PhotoHandlers(this.bot, this.fileManager, this.stateManager, callbackHandlers);
 
     this.startBackgroundTasks();
 
@@ -66,7 +53,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     });
 
     await this.bot.launch();
-    this.logger.log('✅ Legacy functionality is registered and bot is listening for updates');
+    this.logger.log('Bot launched with new modular architecture');
   }
 
   onModuleDestroy(): void {
