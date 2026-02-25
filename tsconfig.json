@@ -4,13 +4,10 @@
   "files": [],
   "references": [
     {
-      "path": "./apps/bot/telegram-e2e"
-    },
-    {
       "path": "./apps/bot/telegram"
     },
     {
-      "path": "./libs/database"
+      "path": "./libs/core"
     }
   ]
 }

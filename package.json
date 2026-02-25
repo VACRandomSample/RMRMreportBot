@@ -40,9 +40,11 @@
     "@nestjs/platform-express": "^11.0.0",
     "@nestjs/typeorm": "^11.0.0",
     "axios": "^1.6.0",
+    "joi": "^18.0.2",
     "pg": "^8.18.0",
     "reflect-metadata": "^0.1.13",
     "rxjs": "^7.8.0",
+    "telegraf": "^4.16.3",
     "typeorm": "^0.3.28"
   }
 }

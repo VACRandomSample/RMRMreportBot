@@ -1,20 +1,10 @@
-/**
- * This is not a production server yet!
- * This is only a minimal backend to get started.
- */
-
-import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app/app.module';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-  const globalPrefix = 'api';
-  app.setGlobalPrefix(globalPrefix);
-
-  Logger.log(
-    `🚀 Application is run`
-  );
+  // Запускаем HTTP-сервер (даже если не нужен), чтобы процесс не завершался
+  await app.listen(3000);
+  console.log('HTTP сервер запущен на порту 3000 (нужен только для удержания процесса)');
 }
-
 bootstrap();
