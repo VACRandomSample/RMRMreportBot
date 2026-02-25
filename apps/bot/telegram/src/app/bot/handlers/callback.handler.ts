@@ -68,7 +68,7 @@ class CallbackHandlers {
   async handleTestConnection(ctx) {
     await ctx.answerCbQuery();
     // Reuse command handler
-    const CommandHandlers = require("./commands");
+    const CommandHandlers = require("./command.handler").default;
     const cmdHandlers = new CommandHandlers(
       this.bot,
       this.fileManager,
