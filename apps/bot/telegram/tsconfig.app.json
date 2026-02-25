@@ -12,5 +12,9 @@
   },
   "include": ["src/**/*.{ts,js}"],
   "exclude": ["eslint.config.js", "eslint.config.cjs", "eslint.config.mjs"],
-  "references": []
+  "references": [
+    {
+      "path": "../../../libs/core/tsconfig.lib.json"
+    }
+  ]
 }
