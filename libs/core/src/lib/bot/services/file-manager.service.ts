@@ -1,16 +1,16 @@
 // @ts-nocheck
-const fs = require('fs');
-const path = require('path');
-const https = require('https');
-const { safeDeleteFile, ensureDirectory } = require('../utils/bot.utils');
-const config = require('../config/bot.config').default;
+const fs = require("fs");
+const path = require("path");
+const https = require("https");
+const { safeDeleteFile, ensureDirectory } = require("../utils/bot.utils");
+const config = require("../config/bot.config").default;
 
 class FileManager {
   constructor() {
     this.photosDir = config.photosDir;
     this.settingsFile = config.settingsFile;
     this.userSettings = {};
-    
+
     this.init();
   }
 
@@ -28,9 +28,11 @@ class FileManager {
   loadSettings() {
     if (fs.existsSync(this.settingsFile)) {
       try {
-        this.userSettings = JSON.parse(fs.readFileSync(this.settingsFile, 'utf8'));
+        this.userSettings = JSON.parse(
+          fs.readFileSync(this.settingsFile, "utf8")
+        );
       } catch (error) {
-        console.error('Error loading settings:', error);
+        console.error("Error loading settings:", error);
         this.userSettings = {};
       }
     } else {
@@ -43,9 +45,12 @@ class FileManager {
    */
   saveSettings() {
     try {
-      fs.writeFileSync(this.settingsFile, JSON.stringify(this.userSettings, null, 2));
+      fs.writeFileSync(
+        this.settingsFile,
+        JSON.stringify(this.userSettings, null, 2)
+      );
     } catch (error) {
-      console.error('Error saving settings:', error);
+      console.error("Error saving settings:", error);
     }
   }
 
@@ -57,7 +62,7 @@ class FileManager {
       this.userSettings[userId] = {
         yandexToken: null,
         yandexPath: config.defaultBasePath,
-        lastActivity: new Date().toISOString()
+        lastActivity: new Date().toISOString(),
       };
       this.saveSettings();
     }
@@ -79,21 +84,23 @@ class FileManager {
    */
   async downloadFile(url, fileName = null) {
     return new Promise((resolve, reject) => {
-      const fileNameToUse = fileName || path.basename(url) || 'downloaded_file';
+      const fileNameToUse = fileName || path.basename(url) || "downloaded_file";
       const filePath = path.join(this.photosDir, fileNameToUse);
-      
+
       const file = fs.createWriteStream(filePath);
-      
-      https.get(url, (response) => {
-        response.pipe(file);
-        file.on('finish', () => {
-          file.close();
-          resolve(filePath);
+
+      https
+        .get(url, (response) => {
+          response.pipe(file);
+          file.on("finish", () => {
+            file.close();
+            resolve(filePath);
+          });
+        })
+        .on("error", (err) => {
+          fs.unlink(filePath, () => {});
+          reject(err);
         });
-      }).on('error', (err) => {
-        fs.unlink(filePath, () => {});
-        reject(err);
-      });
     });
   }
 
@@ -109,14 +116,16 @@ class FileManager {
    */
   listLocalPhotos() {
     try {
-      return fs.readdirSync(this.photosDir)
-        .filter(file => 
-          file !== 'photo_info.json' && 
-          !file.startsWith('.') &&
-          /\.(jpg|jpeg|png|gif)$/i.test(file)
+      return fs
+        .readdirSync(this.photosDir)
+        .filter(
+          (file) =>
+            file !== "photo_info.json" &&
+            !file.startsWith(".") &&
+            /\.(jpg|jpeg|png|gif)$/i.test(file)
         );
     } catch (error) {
-      console.error('Error listing local photos:', error);
+      console.error("Error listing local photos:", error);
       return [];
     }
   }
@@ -126,12 +135,13 @@ class FileManager {
    */
   async cleanupOldFiles(maxAge = config.fileRetentionTime) {
     try {
-      const files = fs.readdirSync(this.photosDir)
-        .filter(file => file !== 'photo_info.json' && !file.startsWith('.'));
-      
+      const files = fs
+        .readdirSync(this.photosDir)
+        .filter((file) => file !== "photo_info.json" && !file.startsWith("."));
+
       const cutoffTime = Date.now() - maxAge;
       let deletedCount = 0;
-      
+
       for (const file of files) {
         const filePath = path.join(this.photosDir, file);
         try {
@@ -141,17 +151,17 @@ class FileManager {
             deletedCount++;
           }
         } catch (error) {
-          console.error('Error checking file:', error);
+          console.error("Error checking file:", error);
         }
       }
-      
+
       if (deletedCount > 0) {
         console.log(`Auto-cleanup: deleted ${deletedCount} files`);
       }
-      
+
       return deletedCount;
     } catch (error) {
-      console.error('Error during cleanup:', error);
+      console.error("Error during cleanup:", error);
       return 0;
     }
   }

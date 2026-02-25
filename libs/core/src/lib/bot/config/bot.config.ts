@@ -1,4 +1,4 @@
-import path from 'path';
+import path from "path";
 
 export interface BotYandexConfig {
   clientId: string;
@@ -42,44 +42,46 @@ const workspaceRoot = process.cwd();
 const botConfig: BotConfig = {
   botToken: process.env.TELEGRAM_BOT_TOKEN ?? process.env.TOKEN_BOT,
   yandex: {
-    clientId: process.env.YANDEX_CLIENT_ID ?? 'ВАШ_CLIENT_ID',
-    clientSecret: process.env.YANDEX_CLIENT_SECRET ?? 'ВАШ_CLIENT_SECRET',
-    redirectUri: process.env.YANDEX_REDIRECT_URI ?? 'https://oauth.yandex.ru/verification_code',
-    apiHost: 'cloud-api.yandex.net',
-    resourceUrl: '/v1/disk/resources',
-    uploadUrl: '/v1/disk/resources/upload',
+    clientId: process.env.YANDEX_CLIENT_ID ?? "ВАШ_CLIENT_ID",
+    clientSecret: process.env.YANDEX_CLIENT_SECRET ?? "ВАШ_CLIENT_SECRET",
+    redirectUri:
+      process.env.YANDEX_REDIRECT_URI ??
+      "https://oauth.yandex.ru/verification_code",
+    apiHost: "cloud-api.yandex.net",
+    resourceUrl: "/v1/disk/resources",
+    uploadUrl: "/v1/disk/resources/upload",
   },
-  photosDir: path.join(workspaceRoot, 'photos'),
-  settingsFile: path.join(workspaceRoot, 'user_settings.json'),
-  defaultBasePath: process.env.DEFAULT_BASE_PATH ?? '/RMRPreport',
+  photosDir: path.join(workspaceRoot, "photos"),
+  settingsFile: path.join(workspaceRoot, "user_settings.json"),
+  defaultBasePath: process.env.DEFAULT_BASE_PATH ?? "/RMRPreport",
   cleanupInterval: Number(process.env.CLEANUP_INTERVAL ?? 30 * 60 * 1000),
   fileRetentionTime: Number(process.env.FILE_RETENTION_TIME ?? 60 * 60 * 1000),
   pendingEventTTL: Number(process.env.PENDING_EVENT_TTL ?? 24 * 60 * 60 * 1000),
 
   categories: {
     punishments: {
-      name: 'Наказания в игре',
-      nightName: 'Ночные наказания в игре',
+      name: "Наказания в игре",
+      nightName: "Ночные наказания в игре",
       singleScreenshot: true,
     },
     mp: {
-      name: 'МП',
-      folder: 'МП',
+      name: "МП",
+      folder: "МП",
       twoScreenshots: true,
     },
     mpHelp: {
-      name: 'Помощь в МП',
-      folder: 'Помощь в МП',
+      name: "Помощь в МП",
+      folder: "Помощь в МП",
       singleScreenshot: true,
     },
     events: {
-      name: 'События',
+      name: "События",
       twoScreenshots: true,
       types: {
-        raids: { name: 'Налёты, захваты', nightName: 'Ночные налеты, захваты' },
+        raids: { name: "Налёты, захваты", nightName: "Ночные налеты, захваты" },
         supplies: {
-          name: 'Поставки, ограбления (Краз, Air)',
-          nightName: 'Ночные поставки, ограбления (Краз, Air)',
+          name: "Поставки, ограбления (Краз, Air)",
+          nightName: "Ночные поставки, ограбления (Краз, Air)",
         },
       },
     },
