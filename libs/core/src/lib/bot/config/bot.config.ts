@@ -40,7 +40,9 @@ export interface BotConfig {
 const workspaceRoot = process.cwd();
 
 const botConfig: BotConfig = {
-  botToken: process.env.TELEGRAM_BOT_TOKEN ?? process.env.TOKEN_BOT,
+  botToken: process.env.TELEGRAM_BOT_TOKEN ??
+    process.env.TOKEN_BOT ??
+    process.env.TG_TOKEN_BOT,
   yandex: {
     clientId: process.env.YANDEX_CLIENT_ID ?? "ВАШ_CLIENT_ID",
     clientSecret: process.env.YANDEX_CLIENT_SECRET ?? "ВАШ_CLIENT_SECRET",
