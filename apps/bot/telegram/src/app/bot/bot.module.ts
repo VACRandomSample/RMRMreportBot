@@ -12,10 +12,13 @@ import { TELEGRAM_BOT } from "./bot.constants";
       useFactory: (configService: ConfigService) => {
         const token =
           configService.get<string>("TELEGRAM_BOT_TOKEN") ??
-          configService.get<string>("TOKEN_BOT");
+          configService.get<string>("TOKEN_BOT") ??
+          configService.get<string>("TG_TOKEN_BOT");
 
         if (!token) {
-          throw new Error("TELEGRAM_BOT_TOKEN (или TOKEN_BOT) не задан в .env");
+          throw new Error(
+            "TELEGRAM_BOT_TOKEN (или TOKEN_BOT / TG_TOKEN_BOT) не задан в .env"
+          );
         }
 
         return new Telegraf(token);

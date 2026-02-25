@@ -2,7 +2,9 @@ require("dotenv").config();
 
 const config = {
   // Telegram Bot
-  botToken: process.env.TELEGRAM_BOT_TOKEN || process.env.TOKEN_BOT,
+  botToken: process.env.TELEGRAM_BOT_TOKEN ||
+    process.env.TOKEN_BOT ||
+    process.env.TG_TOKEN_BOT,
 
   // Yandex OAuth
   yandex: {
