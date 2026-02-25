@@ -1,18 +1,18 @@
 // @ts-nocheck
-const { getWeekKey, isNightTime } = require('../utils/bot.utils');
+const { getWeekKey, isNightTime } = require("../utils/bot.utils");
 
 class StateManager {
   constructor() {
     // Wizard states for each user
     this.wizardStates = new Map();
-    
+
     // Event counters for each week
     this.eventCounters = new Map();
-    
+
     // Pending events (uncompleted)
     this.pendingEvents = new Map();
     this.pendingMPEvents = new Map();
-    
+
     // MP counters for each week
     this.mpCounters = new Map();
   }
@@ -53,7 +53,7 @@ class StateManager {
     this.pendingEvents.set(key, {
       eventNumber,
       eventType,
-      timestamp: Date.now()
+      timestamp: Date.now(),
     });
     return eventNumber;
   }
@@ -78,7 +78,7 @@ class StateManager {
     this.pendingMPEvents.set(key, {
       mpNumber,
       timestamp: Date.now(),
-      folderPath
+      folderPath,
     });
   }
 
@@ -111,9 +111,9 @@ class StateManager {
   cleanupPendingEvents() {
     const now = Date.now();
     const oneDay = 24 * 60 * 60 * 1000;
-    
+
     let cleanedCount = 0;
-    
+
     // Clean pending events
     for (const [key, event] of this.pendingEvents.entries()) {
       if (now - event.timestamp > oneDay) {
@@ -122,7 +122,7 @@ class StateManager {
         cleanedCount++;
       }
     }
-    
+
     // Clean pending MP events
     for (const [key, mp] of this.pendingMPEvents.entries()) {
       if (now - mp.timestamp > oneDay) {
@@ -131,7 +131,7 @@ class StateManager {
         cleanedCount++;
       }
     }
-    
+
     return cleanedCount;
   }
 
@@ -140,32 +140,32 @@ class StateManager {
    */
   getUserPendingEvents(userId) {
     const events = [];
-    
+
     // Check pending events
     for (const [key, event] of this.pendingEvents.entries()) {
       if (key.startsWith(`${userId}_`)) {
         events.push({
-          type: 'event',
+          type: "event",
           eventType: event.eventType,
           eventNumber: event.eventNumber,
           timestamp: event.timestamp,
-          age: Math.round((Date.now() - event.timestamp) / 60000)
+          age: Math.round((Date.now() - event.timestamp) / 60000),
         });
       }
     }
-    
+
     // Check pending MP events
     for (const [key, mp] of this.pendingMPEvents.entries()) {
       if (key.startsWith(`${userId}_`)) {
         events.push({
-          type: 'mp',
+          type: "mp",
           mpNumber: mp.mpNumber,
           timestamp: mp.timestamp,
-          age: Math.round((Date.now() - mp.timestamp) / 60000)
+          age: Math.round((Date.now() - mp.timestamp) / 60000),
         });
       }
     }
-    
+
     return events;
   }
 
@@ -174,21 +174,21 @@ class StateManager {
    */
   clearUserPendingEvents(userId) {
     let clearedCount = 0;
-    
+
     for (const [key, event] of this.pendingEvents.entries()) {
       if (key.startsWith(`${userId}_`)) {
         this.pendingEvents.delete(key);
         clearedCount++;
       }
     }
-    
+
     for (const [key, mp] of this.pendingMPEvents.entries()) {
       if (key.startsWith(`${userId}_`)) {
         this.pendingMPEvents.delete(key);
         clearedCount++;
       }
     }
-    
+
     return clearedCount;
   }
 }

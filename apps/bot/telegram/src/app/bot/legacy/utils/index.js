@@ -1,12 +1,12 @@
-const fs = require('fs');
-const path = require('path');
+const fs = require("fs");
+const path = require("path");
 
 /**
  * Format date to DD.MM.YY
  */
 function formatDate(date) {
-  const day = String(date.getDate()).padStart(2, '0');
-  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
   const year = String(date.getFullYear()).slice(-2);
   return `${day}.${month}.${year}`;
 }
@@ -18,15 +18,15 @@ function getCurrentWeekFolder() {
   const now = new Date();
   const dayOfWeek = now.getDay();
   const startOfWeek = new Date(now);
-  
+
   // Start of week - Monday (day = 1)
   const diff = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
   startOfWeek.setDate(now.getDate() - diff);
-  
+
   // End of week - Sunday
   const endOfWeek = new Date(startOfWeek);
   endOfWeek.setDate(startOfWeek.getDate() + 6);
-  
+
   return `${formatDate(startOfWeek)} – ${formatDate(endOfWeek)}`;
 }
 
@@ -67,14 +67,14 @@ function generateFileName(prefix = 'photo', extension = 'jpg') {
 function extractEventNumbers(filenames) {
   const numbers = [];
   const pattern = /^(\d+)-[12]\.(jpg|jpeg|png|gif)$/i;
-  
+
   for (const filename of filenames) {
     const match = pattern.exec(filename);
     if (match) {
       numbers.push(parseInt(match[1], 10));
     }
   }
-  
+
   return [...new Set(numbers)]; // Remove duplicates
 }
 
@@ -87,10 +87,10 @@ async function safeDeleteFile(filePath) {
       resolve(true);
       return;
     }
-    
+
     fs.unlink(filePath, (err) => {
       if (err) {
-        console.error('Error deleting file:', err);
+        console.error("Error deleting file:", err);
         resolve(false);
       } else {
         console.log(`File deleted: ${filePath}`);
@@ -113,7 +113,7 @@ function ensureDirectory(dirPath) {
  * Parse command arguments from message text
  */
 function parseCommandArgs(text, commandName) {
-  const parts = text.split(' ');
+  const parts = text.split(" ");
   if (parts[0] !== `/${commandName}`) return null;
   return parts.slice(1);
 }
@@ -122,11 +122,11 @@ function parseCommandArgs(text, commandName) {
  * Format bytes to human readable format
  */
 function formatBytes(bytes) {
-  if (bytes === 0) return '0 Bytes';
+  if (bytes === 0) return "0 Bytes";
   const k = 1024;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const sizes = ["Bytes", "KB", "MB", "GB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
 
 module.exports = {
@@ -139,5 +139,5 @@ module.exports = {
   safeDeleteFile,
   ensureDirectory,
   parseCommandArgs,
-  formatBytes
+  formatBytes,
 };

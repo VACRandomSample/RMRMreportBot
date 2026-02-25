@@ -1,10 +1,22 @@
-import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { Telegraf } from 'telegraf';
-import { TELEGRAM_BOT } from './bot.constants';
-import { botConfig as config, FileManager, YandexDisk, StateManager, EventManager } from '@org/core';
-import CommandHandlers from './handlers/command.handler';
-import CallbackHandlers from './handlers/callback.handler';
-import PhotoHandlers from './handlers/photo.handler';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+} from "@nestjs/common";
+import { Telegraf } from "telegraf";
+import { TELEGRAM_BOT } from "./bot.constants";
+import {
+  botConfig as config,
+  FileManager,
+  YandexDisk,
+  StateManager,
+  EventManager,
+} from "@org/core";
+import CommandHandlers from "./handlers/command.handler";
+import CallbackHandlers from "./handlers/callback.handler";
+import PhotoHandlers from "./handlers/photo.handler";
 
 @Injectable()
 export class BotService implements OnModuleInit, OnModuleDestroy {
@@ -16,7 +28,11 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
   private readonly stateManager = new StateManager();
 
-  private readonly eventManager = new EventManager(this.yandexDisk, this.stateManager, this.fileManager);
+  private readonly eventManager = new EventManager(
+    this.yandexDisk,
+    this.stateManager,
+    this.fileManager
+  );
 
   private cleanupFilesInterval?: NodeJS.Timeout;
 
@@ -32,7 +48,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       this.fileManager,
       this.yandexDisk,
       this.stateManager,
-      this.eventManager,
+      this.eventManager
     );
 
     const callbackHandlers = new CallbackHandlers(
@@ -40,20 +56,25 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       this.fileManager,
       this.yandexDisk,
       this.stateManager,
-      this.eventManager,
+      this.eventManager
     );
 
-    new PhotoHandlers(this.bot, this.fileManager, this.stateManager, callbackHandlers);
+    new PhotoHandlers(
+      this.bot,
+      this.fileManager,
+      this.stateManager,
+      callbackHandlers
+    );
 
     this.startBackgroundTasks();
 
     this.bot.catch((err, ctx) => {
       this.logger.error(`Telegraf error: ${String(err)}`);
-      void ctx.reply('⚠️ Внутренняя ошибка бота').catch(() => undefined);
+      void ctx.reply("⚠️ Внутренняя ошибка бота").catch(() => undefined);
     });
 
     await this.bot.launch();
-    this.logger.log('Bot launched with new modular architecture');
+    this.logger.log("Bot launched with new modular architecture");
   }
 
   onModuleDestroy(): void {
@@ -65,7 +86,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       clearInterval(this.cleanupPendingInterval);
     }
 
-    this.bot.stop('nest shutdown');
+    this.bot.stop("nest shutdown");
   }
 
   private startBackgroundTasks(): void {
@@ -80,6 +101,6 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       }
     }, config.cleanupInterval);
 
-    this.logger.log('Background maintenance tasks started');
+    this.logger.log("Background maintenance tasks started");
   }
 }

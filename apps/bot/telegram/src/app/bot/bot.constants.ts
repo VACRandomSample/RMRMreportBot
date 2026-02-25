@@ -1,1 +1,1 @@
-export const TELEGRAM_BOT = 'TELEGRAM_BOT';
+export const TELEGRAM_BOT = "TELEGRAM_BOT";
