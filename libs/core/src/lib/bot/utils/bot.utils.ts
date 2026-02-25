@@ -55,10 +55,11 @@ function isNightTime() {
 /**
  * Generate unique filename
  */
-function generateFileName(prefix = 'photo') {
+function generateFileName(prefix = 'photo', extension = 'jpg') {
   const timestamp = Date.now();
   const random = Math.random().toString(36).substring(7);
-  return `${prefix}_${timestamp}_${random}.jpg`;
+  const normalizedExtension = String(extension || 'jpg').replace(/^\./, '').toLowerCase();
+  return `${prefix}_${timestamp}_${random}.${normalizedExtension}`;
 }
 
 /**
