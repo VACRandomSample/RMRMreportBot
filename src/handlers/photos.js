@@ -3,10 +3,11 @@ const { Markup } = require('telegraf');
 const { generateFileName } = require('../utils');
 
 class PhotoHandlers {
-  constructor(bot, fileManager, stateManager) {
+  constructor(bot, fileManager, stateManager, callbackHandlers) {
     this.bot = bot;
     this.fileManager = fileManager;
     this.stateManager = stateManager;
+    this.callbackHandlers = callbackHandlers;
     
     this.registerHandlers();
   }
@@ -27,6 +28,7 @@ class PhotoHandlers {
    */
   async handlePhoto(ctx) {
     const userId = ctx.from.id;
+    const receivedAt = new Date(ctx.message.date * 1000).toISOString();
     
     try {
       const photo = ctx.message.photo[ctx.message.photo.length - 1];
@@ -40,6 +42,7 @@ class PhotoHandlers {
       // Initialize wizard state
       this.stateManager.setWizardState(userId, {
         step: 1,
+        receivedAt,
         fileId,
         filePathLocal,
         user: ctx.from,
@@ -49,9 +52,7 @@ class PhotoHandlers {
       });
       
       // Start wizard
-      const CallbackHandlers = require('./callbacks');
-      const callbacks = new CallbackHandlers(this.bot, this.fileManager, null, this.stateManager, null);
-      await callbacks.sendStep1(ctx, userId);
+      await this.callbackHandlers.sendStep1(ctx, userId);
       
     } catch (error) {
       console.error('Error processing photo:', error);
@@ -71,6 +72,7 @@ class PhotoHandlers {
     }
     
     const userId = ctx.from.id;
+    const receivedAt = new Date(ctx.message.date * 1000).toISOString();
     
     try {
       const fileId = document.file_id;
@@ -89,6 +91,7 @@ class PhotoHandlers {
       // Initialize wizard state
       this.stateManager.setWizardState(userId, {
         step: 1,
+        receivedAt,
         fileId,
         filePathLocal,
         user: ctx.from,
@@ -98,9 +101,7 @@ class PhotoHandlers {
       });
       
       // Start wizard
-      const CallbackHandlers = require('./callbacks');
-      const callbacks = new CallbackHandlers(this.bot, this.fileManager, null, this.stateManager, null);
-      await callbacks.sendStep1(ctx, userId);
+      await this.callbackHandlers.sendStep1(ctx, userId);
       
     } catch (error) {
       console.error('Error processing photo document:', error);

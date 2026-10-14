@@ -1,5 +1,5 @@
 const { Markup } = require('telegraf');
-const { getCurrentWeekFolder, isNightTime, formatDate } = require('../utils');
+const { getCurrentWeekFolder, isNightTime } = require('../utils');
 const config = require('../config');
 
 class CallbackHandlers {
@@ -97,15 +97,15 @@ class CallbackHandlers {
     if (!state) return;
     
     const basePath = this.getBasePath(userId, state);
-    const weekFolder = getCurrentWeekFolder();
-    const isNight = isNightTime();
+    const weekFolder = getCurrentWeekFolder(new Date(state.receivedAt || Date.now()));
+    const isNight = isNightTime(new Date(state.receivedAt || Date.now()));
     const folderName = isNight ? 'Ночные наказания в игре' : 'Наказания в игре';
     
     const fileName = `punishment_${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
     const remotePath = `${basePath}/${weekFolder}/${folderName}/${fileName}`;
     
     try {
-      await this.ensureWeekFolder(userId, basePath);
+      await this.ensureWeekFolder(userId, basePath, weekFolder);
       
       const saved = await this.savePhotoToYandex(userId, state.filePathLocal, remotePath);
       
@@ -149,13 +149,13 @@ class CallbackHandlers {
     if (!state) return;
     
     const basePath = this.getBasePath(userId, state);
-    const weekFolder = getCurrentWeekFolder();
+    const weekFolder = getCurrentWeekFolder(new Date(state.receivedAt || Date.now()));
     
     const fileName = `mp_help_${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
     const remotePath = `${basePath}/${weekFolder}/Помощь в МП/${fileName}`;
     
     try {
-      await this.ensureWeekFolder(userId, basePath);
+      await this.ensureWeekFolder(userId, basePath, weekFolder);
       
       const saved = await this.savePhotoToYandex(userId, state.filePathLocal, remotePath);
       
@@ -287,8 +287,7 @@ class CallbackHandlers {
     return settings.yandexPath || config.defaultBasePath;
   }
 
-  async ensureWeekFolder(userId, basePath) {
-    const weekFolder = getCurrentWeekFolder();
+  async ensureWeekFolder(userId, basePath, weekFolder = getCurrentWeekFolder()) {
     const fullPath = `${basePath}/${weekFolder}`;
     
     await this.yandexDisk.ensurePath(userId, fullPath);
@@ -358,7 +357,7 @@ class CallbackHandlers {
       [Markup.button.callback('❌ Отмена', 'cancel_wizard')]
     ]);
     
-    const nightPrefix = isNightTime() ? 'Ночные ' : '';
+    const nightPrefix = isNightTime(new Date(state.receivedAt || Date.now())) ? 'Ночные ' : '';
     
     await ctx.telegram.editMessageText(
       state.chatId,
@@ -381,8 +380,8 @@ class CallbackHandlers {
     state.data.eventType = eventType;
     
     const basePath = this.getBasePath(userId, state);
-    const weekFolder = getCurrentWeekFolder();
-    const isNight = isNightTime();
+    const weekFolder = getCurrentWeekFolder(new Date(state.receivedAt || Date.now()));
+    const isNight = isNightTime(new Date(state.receivedAt || Date.now()));
     
     // Determine folder name based on event type and time
     let folderName;
@@ -392,7 +391,8 @@ class CallbackHandlers {
       folderName = isNight ? 'Ночные поставки, ограбления (Краз, Air)' : 'Поставки, ограбления (Краз, Air)';
     }
     
-    const remoteFolderPath = `${basePath}/${weekFolder}/${folderName}`;
+    const pending = this.stateManager.getPendingEvent(userId, eventType);
+    const remoteFolderPath = pending?.folderPath || `${basePath}/${weekFolder}/${folderName}`;
     
     try {
       const unfinishedEvents = await this.eventManager.getUnfinishedEvents(userId, remoteFolderPath);
@@ -458,8 +458,9 @@ class CallbackHandlers {
     if (!state) return;
     
     const basePath = this.getBasePath(userId, state);
-    const weekFolder = getCurrentWeekFolder();
-    const remoteFolderPath = `${basePath}/${weekFolder}/МП`;
+    const weekFolder = getCurrentWeekFolder(new Date(state.receivedAt || Date.now()));
+    const pending = this.stateManager.getPendingMPEvent(userId);
+    const remoteFolderPath = pending?.folderPath || `${basePath}/${weekFolder}/МП`;
     
     try {
       const unfinishedMPs = await this.eventManager.getUnfinishedEvents(userId, remoteFolderPath);
@@ -529,8 +530,8 @@ class CallbackHandlers {
     }
     
     const basePath = this.getBasePath(userId, state);
-    const weekFolder = getCurrentWeekFolder();
-    const isNight = isNightTime();
+    let weekFolder = getCurrentWeekFolder(new Date(state.receivedAt || Date.now()));
+    const isNight = isNightTime(new Date(state.receivedAt || Date.now()));
     const eventType = state.data.eventType;
     
     // Determine folder name
@@ -541,10 +542,17 @@ class CallbackHandlers {
       folderName = isNight ? 'Ночные поставки, ограбления (Краз, Air)' : 'Поставки, ограбления (Краз, Air)';
     }
     
-    const remoteFolderPath = `${basePath}/${weekFolder}/${folderName}`;
+    let remoteFolderPath = `${basePath}/${weekFolder}/${folderName}`;
     
+    const pendingEvent = stage === 'end' ? this.stateManager.getPendingEvent(userId, eventType) : null;
+    if (pendingEvent?.folderPath) {
+      remoteFolderPath = pendingEvent.folderPath;
+      weekFolder = pendingEvent.weekFolder;
+      folderName = pendingEvent.folderName;
+    }
+
     try {
-      await this.ensureWeekFolder(userId, basePath);
+      await this.yandexDisk.ensurePath(userId, remoteFolderPath);
       
       let eventNumber;
       let isExistingEvent = false;
@@ -559,16 +567,11 @@ class CallbackHandlers {
           eventNumber = eventNumber + 1;
         }
         
-        // Save as pending event
-        this.stateManager.setPendingEvent(userId, eventType, eventNumber);
-        
       } else if (stage === 'end') {
         // Check pending events
-        const pendingEvent = this.stateManager.getPendingEvent(userId, eventType);
         
         if (pendingEvent) {
           eventNumber = pendingEvent.eventNumber;
-          this.stateManager.deletePendingEvent(userId, eventType);
           isExistingEvent = true;
           
           // Check if end already exists
@@ -603,6 +606,13 @@ class CallbackHandlers {
       const saved = await this.savePhotoToYandex(userId, state.filePathLocal, remotePath);
       
       if (saved) {
+        if (stage === 'start') {
+          this.stateManager.setPendingEvent(userId, eventType, eventNumber, {
+            folderPath: remoteFolderPath, weekFolder, folderName
+          });
+        } else if (pendingEvent) {
+          this.stateManager.deletePendingEvent(userId, eventType);
+        }
         let message = `✅ **Фото события сохранено!**\n\n` +
                      `📁 Категория: ${folderName}\n` +
                      `🗓️ Неделя: ${weekFolder}\n` +
@@ -642,11 +652,17 @@ class CallbackHandlers {
     if (!state) return;
     
     const basePath = this.getBasePath(userId, state);
-    const weekFolder = getCurrentWeekFolder();
-    const remoteFolderPath = `${basePath}/${weekFolder}/МП`;
+    let weekFolder = getCurrentWeekFolder(new Date(state.receivedAt || Date.now()));
+    let remoteFolderPath = `${basePath}/${weekFolder}/МП`;
     
+    const pendingMP = stage === 'end' ? this.stateManager.getPendingMPEvent(userId) : null;
+    if (pendingMP?.folderPath) {
+      remoteFolderPath = pendingMP.folderPath;
+      weekFolder = pendingMP.weekFolder || remoteFolderPath.split('/').at(-2);
+    }
+
     try {
-      await this.ensureWeekFolder(userId, basePath);
+      await this.yandexDisk.ensurePath(userId, remoteFolderPath);
       
       let mpNumber;
       let isExistingMP = false;
@@ -664,16 +680,11 @@ class CallbackHandlers {
           mpNumber = mpNumber + 1;
         }
         
-        // Save as pending MP
-        this.stateManager.setPendingMPEvent(userId, mpNumber, remoteFolderPath);
-        
       } else if (stage === 'end') {
         // Check pending MP events
-        const pendingMP = this.stateManager.getPendingMPEvent(userId);
         
         if (pendingMP) {
           mpNumber = pendingMP.mpNumber;
-          this.stateManager.deletePendingMPEvent(userId);
           isExistingMP = true;
           
           // Check if end already exists
@@ -711,6 +722,11 @@ class CallbackHandlers {
       const saved = await this.savePhotoToYandex(userId, state.filePathLocal, remotePath);
       
       if (saved) {
+        if (stage === 'start') {
+          this.stateManager.setPendingMPEvent(userId, mpNumber, remoteFolderPath, weekFolder);
+        } else if (pendingMP) {
+          this.stateManager.deletePendingMPEvent(userId);
+        }
         let message = `✅ **Фото МП сохранено!**\n\n` +
                      `📁 Категория: МП\n` +
                      `🗓️ Неделя: ${weekFolder}\n` +
