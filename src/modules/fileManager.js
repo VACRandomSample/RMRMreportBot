@@ -29,8 +29,7 @@ class FileManager {
       try {
         this.userSettings = JSON.parse(fs.readFileSync(this.settingsFile, 'utf8'));
       } catch (error) {
-        console.error('Error loading settings:', error);
-        this.userSettings = {};
+        throw new Error(`Cannot read user settings: ${error.message}`);
       }
     } else {
       this.saveSettings();
@@ -42,9 +41,11 @@ class FileManager {
    */
   saveSettings() {
     try {
-      fs.writeFileSync(this.settingsFile, JSON.stringify(this.userSettings, null, 2));
+      const temporary = `${this.settingsFile}.tmp`;
+      fs.writeFileSync(temporary, JSON.stringify(this.userSettings, null, 2), { mode: 0o600 });
+      fs.renameSync(temporary, this.settingsFile);
     } catch (error) {
-      console.error('Error saving settings:', error);
+      throw new Error(`Cannot save user settings: ${error.message}`);
     }
   }
 
@@ -77,23 +78,24 @@ class FileManager {
    * Download file from URL
    */
   async downloadFile(url, fileName = null) {
-    return new Promise((resolve, reject) => {
-      const fileNameToUse = fileName || path.basename(url) || 'downloaded_file';
-      const filePath = path.join(this.photosDir, fileNameToUse);
-      
-      const file = fs.createWriteStream(filePath);
-      
-      https.get(url, (response) => {
-        response.pipe(file);
-        file.on('finish', () => {
-          file.close();
-          resolve(filePath);
-        });
-      }).on('error', (err) => {
-        fs.unlink(filePath, () => {});
-        reject(err);
+    const { pipeline } = require('node:stream/promises');
+    const filePath = path.join(this.photosDir, fileName || path.basename(url));
+    try {
+      const response = await new Promise((resolve, reject) => {
+        const request = (this.transport || https).get(url, resolve);
+        request.setTimeout(30000, () => request.destroy(new Error('Download timeout')));
+        request.on('error', reject);
       });
-    });
+      if (response.statusCode !== 200) {
+        response.resume();
+        throw new Error(`Download HTTP ${response.statusCode}`);
+      }
+      await pipeline(response, fs.createWriteStream(filePath));
+      return filePath;
+    } catch (error) {
+      await safeDeleteFile(filePath);
+      throw error;
+    }
   }
 
   /**
@@ -131,8 +133,10 @@ class FileManager {
       const cutoffTime = Date.now() - maxAge;
       let deletedCount = 0;
       
+      const protectedFiles = this.stateManager?.protectedFiles() || new Set();
       for (const file of files) {
         const filePath = path.join(this.photosDir, file);
+        if (protectedFiles.has(filePath)) continue;
         try {
           const stats = fs.statSync(filePath);
           if (stats.mtimeMs < cutoffTime) {

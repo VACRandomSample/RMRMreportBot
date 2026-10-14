@@ -1,5 +1,5 @@
-node_modules/*
-
+node_modules/
 .env
-
-photos/*
+photos/
+data/
+user_settings.json

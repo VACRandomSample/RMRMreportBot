@@ -2,45 +2,101 @@ const { Markup } = require('telegraf');
 const config = require('../config');
 
 class CommandHandlers {
-  constructor(bot, fileManager, yandexDisk, stateManager, eventManager) {
+  constructor(bot, fileManager, yandexDisk, stateManager, eventManager, uploadQueue = null, reports = null) {
     this.bot = bot;
     this.fileManager = fileManager;
     this.yandexDisk = yandexDisk;
     this.stateManager = stateManager;
     this.eventManager = eventManager;
-    
+    this.uploadQueue = uploadQueue;
+    this.reports = reports;
+
     this.registerCommands();
   }
 
   registerCommands() {
     // Auth commands
-    this.bot.command('auth', this.handleAuth.bind(this));
-    this.bot.command('code', this.handleCode.bind(this));
-    this.bot.command('test', this.handleTest.bind(this));
-    this.bot.command('disconnect', this.handleDisconnect.bind(this));
-    
+    this.command('auth', this.handleAuth.bind(this));
+    this.command('code', this.handleCode.bind(this));
+    this.command('test', this.handleTest.bind(this));
+    this.command('disconnect', this.handleDisconnect.bind(this));
+
     // Settings commands
-    this.bot.command('settings', this.handleSettings.bind(this));
-    this.bot.command('setpath', this.handleSetPath.bind(this));
-    this.bot.command('setbasepath', this.handleSetBasePath.bind(this));
-    
+    this.command('settings', this.handleSettings.bind(this));
+    this.command('setpath', this.handleSetPath.bind(this));
+    this.command('setbasepath', this.handleSetBasePath.bind(this));
+
     // Utility commands
-    this.bot.command('start', this.handleStart.bind(this));
-    this.bot.command('sync_events', this.handleSyncEvents.bind(this));
-    this.bot.command('pending', this.handlePending.bind(this));
-    this.bot.command('pending_mp', this.handlePendingMP.bind(this));
-    this.bot.command('clear_pending', this.handleClearPending.bind(this));
-    this.bot.command('init_folders', this.handleInitFolders.bind(this));
-    this.bot.command('reset_wizard', this.handleResetWizard.bind(this));
-    this.bot.command('list_photos', this.handleListPhotos.bind(this));
-    this.bot.command('cleanup', this.handleCleanup.bind(this));
-    this.bot.command('quit', this.handleQuit.bind(this));
-    
+    this.command('start', this.handleStart.bind(this));
+    this.command('sync_events', this.handleSyncEvents.bind(this));
+    this.command('pending', this.handlePending.bind(this));
+    this.command('pending_mp', this.handlePendingMP.bind(this));
+    this.command('clear_pending', this.handleClearPending.bind(this));
+    this.command('init_folders', this.handleInitFolders.bind(this));
+    this.command('reset_wizard', this.handleResetWizard.bind(this));
+    this.command('list_photos', this.handleListPhotos.bind(this));
+    this.command('cleanup', this.handleCleanup.bind(this));
+    this.command('quit', this.handleQuit.bind(this));
+
+    this.command('time', this.handleTime.bind(this));
+    this.command('uploads', this.handleUploads.bind(this));
+    this.command('retry_uploads', this.handleRetryUploads.bind(this));
+    this.command('weekly', this.handleWeekly.bind(this));
+    this.command('reminders', this.handleReminders.bind(this));
+    this.bot.action(/^remind_([a-f0-9]{32})$/, ctx => this.stateManager.withUserLock(ctx.from.id, async () => {
+      const e = this.stateManager.listPending(ctx.from.id).find(e => e.id === ctx.match[1]);
+      if (!e || e.endJobId) { await ctx.answerCbQuery('Событие уже завершается или недоступно'); return; }
+      this.fileManager.updateUserSettings(ctx.from.id, { suggestedEventId: e.id });
+      await ctx.answerCbQuery();
+      await ctx.reply(`Отправьте скриншот окончания #${e.eventNumber || e.mpNumber}, затем выберите нужный тип и «Конец».`);
+    }));
+
     // Text handler
     // this.bot.on('text', async (ctx, next) => {
     //   await this.handleText(ctx);
     //   next();
     // });
+  }
+
+  command(name, handler) {
+    this.bot.command(name, ctx => this.stateManager.withUserLock(ctx.from.id, async () => {
+      try { await handler(ctx); } finally { this.stateManager.persist(); }
+    }));
+  }
+  async replyLong(ctx, text) {
+    for (let i = 0; i < text.length; i += 3500) await ctx.reply(text.slice(i, i + 3500));
+  }
+  async handleTime(ctx) {
+    const state = this.stateManager.getWizardState(ctx.from.id);
+    if (!state || state.chatId !== ctx.chat.id) { await ctx.reply('Сначала отправьте фото.'); return; }
+    const match = /^\/time(?:@\w+)? (\d{2})\.(\d{2})\.(\d{4}) (\d{2}):(\d{2})$/.exec(ctx.message.text.trim());
+    if (!match) { await ctx.reply('Формат: /time 14.10.2026 23:59 — московское время.'); return; }
+    const [, d, m, y, h, min] = match;
+    const date = new Date(`${y}-${m}-${d}T${h}:${min}:00+03:00`);
+    const calendar = new Date(date.getTime() + 3 * 3600000);
+    if (!Number.isFinite(date.getTime()) || calendar.getUTCDate() !== Number(d) || calendar.getUTCMonth() + 1 !== Number(m) || calendar.getUTCFullYear() !== Number(y) || calendar.getUTCHours() !== Number(h) || calendar.getUTCMinutes() !== Number(min) || date.getTime() > Date.now() + 5 * 60000) {
+      await ctx.reply('Некорректная дата или время в будущем.'); return;
+    }
+    state.reportAt = date.toISOString(); this.stateManager.persist();
+    await ctx.reply(`Время этого скриншота: ${d}.${m}.${y} ${h}:${min} МСК. Для окончания папка определяется началом события.`);
+  }
+  async handleUploads(ctx) {
+    const jobs = [...this.stateManager.jobs.values()].filter(j => j.userId === ctx.from.id && j.status !== 'done');
+    await this.replyLong(ctx, jobs.length ? 'Очередь загрузок:\n\n' + jobs.map(j => `${j.remotePath}\nСтатус: ${j.status}, попыток: ${j.attempts}${j.error ? `\n${j.error}` : ''}`).join('\n\n') : '✅ Очередь пуста.');
+  }
+  async handleRetryUploads(ctx) { const n = this.uploadQueue.retry(ctx.from.id); await ctx.reply(`Возвращено в очередь: ${n}.`); }
+  async handleWeekly(ctx) {
+    const argument = ctx.message.text.trim().split(/\s+/)[1];
+    if (argument && argument !== 'previous') { await ctx.reply('/weekly — текущая неделя; /weekly previous — предыдущая.'); return; }
+    const date = new Date(Date.now() - (argument === 'previous' ? 7 * 86400000 : 0));
+    await this.replyLong(ctx, this.reports.weeklyText(ctx.from.id, date));
+  }
+  async handleReminders(ctx) {
+    if (ctx.chat.type !== 'private') { await ctx.reply('Настройте напоминания в личном чате с ботом.'); return; }
+    const value = ctx.message.text.trim().split(/\s+/)[1];
+    if (!['on', 'off'].includes(value)) { await ctx.reply('/reminders on — включить; /reminders off — отключить.'); return; }
+    this.fileManager.updateUserSettings(ctx.from.id, { remindersEnabled: value === 'on' });
+    await ctx.reply(value === 'on' ? 'Напоминания включены: через 2 часа без окончания, затем не чаще раза в сутки.' : 'Напоминания отключены.');
   }
 
   /**
@@ -58,7 +114,7 @@ class CommandHandlers {
       `• Фото сохраняются только на Яндекс.Диске\n` +
       `• Локальные копии автоматически удаляются\n` +
       `• Автоматическая организация по папкам\n\n` +
-      `Для начала отправьте мне фото!`,
+      `Для начала отправьте мне фото!\n\n/pending — незавершённые события\n/uploads — очередь\n/weekly — сводка недели\n/reminders on — напоминания\n/time ДД.ММ.ГГГГ ЧЧ:ММ — время текущего фото`,
       { parse_mode: 'Markdown', reply_markup: startKeyboard.reply_markup }
     );
   }
@@ -68,7 +124,7 @@ class CommandHandlers {
    */
   async handleAuth(ctx) {
     const authUrl = `https://oauth.yandex.ru/authorize?response_type=code&client_id=${config.yandex.clientId}&redirect_uri=${encodeURIComponent(config.yandex.redirectUri)}`;
-    
+
     await ctx.reply(
       '🔐 АВТОРИЗАЦИЯ В ЯНДЕКС.ДИСКЕ\n\n' +
       '1. Перейдите по ссылке:\n' +
@@ -87,7 +143,7 @@ class CommandHandlers {
   async handleCode(ctx) {
     const userId = ctx.from.id;
     const code = ctx.message.text.split(' ')[1];
-    
+
     if (!code) {
       await ctx.reply('Пожалуйста, укажите код: /code <ваш_код>');
       return;
@@ -100,7 +156,7 @@ class CommandHandlers {
       params.append('code', code);
       params.append('client_id', config.yandex.clientId);
       params.append('client_secret', config.yandex.clientSecret);
-      
+
       if (config.yandex.redirectUri !== 'https://oauth.yandex.ru/verification_code') {
         params.append('redirect_uri', config.yandex.redirectUri);
       }
@@ -113,10 +169,10 @@ class CommandHandlers {
       if (!token) {
         throw new Error('Token not received');
       }
-      
+
       this.fileManager.updateUserSettings(userId, { yandexToken: token });
       await ctx.reply('✅ Авторизация успешна! Токен сохранен.\n\nДля проверки используйте команду /test');
-      
+
     } catch (error) {
       console.error('Auth error:', error.response?.data || error.message);
       await ctx.reply('❌ Ошибка авторизации. Проверьте код и попробуйте снова.');
@@ -129,25 +185,25 @@ class CommandHandlers {
   async handleTest(ctx) {
     const userId = ctx.from.id;
     const settings = this.fileManager.getUserSettings(userId);
-    
+
     if (!settings.yandexToken) {
       await ctx.reply('❌ Токен не установлен.');
       return;
     }
 
     await ctx.reply('🔄 Проверяем соединение с Яндекс.Диском...');
-    
+
     try {
       const diskInfo = await this.yandexDisk.getDiskInfo(userId);
-      
+
       // Try to create and delete test folder
       const testPath = `${settings.yandexPath || config.defaultBasePath}/test_connection_${Date.now()}`;
       await this.yandexDisk.ensurePath(userId, testPath);
       await this.yandexDisk.delete(userId, testPath);
-      
+
       const freeSpace = Math.round((diskInfo.total_space - diskInfo.used_space) / 1024 / 1024 / 1024);
       await ctx.reply(`✅ Соединение с Яндекс.Диском установлено успешно!\n\nДоступно места: ${freeSpace} ГБ`);
-      
+
     } catch (error) {
       console.error('Connection test error:', error);
       await ctx.reply(`❌ Не удалось подключиться к Яндекс.Диску:\n${error.message}`);
@@ -169,12 +225,12 @@ class CommandHandlers {
   async handleSettings(ctx) {
     const userId = ctx.from.id;
     const settings = this.fileManager.getUserSettings(userId);
-    
+
     const hasToken = settings.yandexToken ? '✅ Установлен' : '❌ Не установлен';
-    const tokenPreview = settings.yandexToken ? 
-      `${settings.yandexToken.substring(0, 10)}...` : 
+    const tokenPreview = settings.yandexToken ?
+      `${settings.yandexToken.substring(0, 10)}...` :
       'Не установлен';
-    
+
     await ctx.reply(
       '⚙️ **Ваши настройки:**\n\n' +
       `🔑 Токен Яндекс.Диска: ${hasToken}\n` +
@@ -195,17 +251,17 @@ class CommandHandlers {
   async handleSetPath(ctx) {
     const userId = ctx.from.id;
     const newPath = ctx.message.text.split(' ').slice(1).join(' ');
-    
+
     if (!newPath) {
       await ctx.reply('Пожалуйста, укажите путь: /setpath <путь_на_яндекс_диске>\nНапример: /setpath /Telegram/Photos');
       return;
     }
 
     const formattedPath = newPath.startsWith('/') ? newPath : `/${newPath}`;
-    
+
     // Update user settings
     this.fileManager.updateUserSettings(userId, { yandexPath: formattedPath });
-    
+
     // Update active wizard if exists
     const state = this.stateManager.getWizardState(userId);
     if (state) {
@@ -221,19 +277,19 @@ class CommandHandlers {
   async handleSetBasePath(ctx) {
     const userId = ctx.from.id;
     const basePath = ctx.message.text.split(' ')[1];
-    
+
     if (!basePath) {
       await ctx.reply('Укажите базовый путь: /setbasepath <путь>\nНапример: /setbasepath /ОтчетыРМРМ');
       return;
     }
 
     const formattedPath = basePath.startsWith('/') ? basePath : `/${basePath}`;
-    
+
     const state = this.stateManager.getWizardState(userId);
     if (state) {
       state.data.basePath = formattedPath;
     }
-    
+
     await ctx.reply(`✅ Базовый путь установлен: ${formattedPath}`);
   }
 
@@ -241,187 +297,38 @@ class CommandHandlers {
    * Handle /sync_events command
    */
   async handleSyncEvents(ctx) {
-    const userId = ctx.from.id;
-    const settings = this.fileManager.getUserSettings(userId);
-    
-    if (!settings.yandexToken) {
-      await ctx.reply('❌ Сначала настройте авторизацию через Яндекс.Диск (/auth)');
-      return;
-    }
-    
-    await ctx.reply('🔄 Синхронизирую события с Яндекс.Диском...');
-    
-    const basePath = settings.yandexPath || config.defaultBasePath;
-    const weekFolder = require('../utils').getCurrentWeekFolder();
-    const isNight = require('../utils').isNightTime();
-    
-    try {
-      const eventTypes = [
-        { name: 'raids', folder: isNight ? 'Ночные налеты, захваты' : 'Налёты, захваты' },
-        { name: 'supplies', folder: isNight ? 'Ночные поставки, ограбления (Краз, Air)' : 'Поставки, ограбления (Краз, Air)' }
-      ];
-      
-      let message = '📋 **Статус событий на Яндекс.Диске:**\n\n';
-      
-      for (const eventType of eventTypes) {
-        const remoteFolderPath = `${basePath}/${weekFolder}/${eventType.folder}`;
-        
-        try {
-          const summary = await this.eventManager.getEventSummary(userId, remoteFolderPath);
-          
-          message += `${eventType.folder}:\n`;
-          message += `  • Всего событий: ${summary.total}\n`;
-          message += `  • Завершено: ${summary.completed}\n`;
-          message += `  • Не завершено: ${summary.incomplete}\n\n`;
-          
-        } catch (error) {
-          message += `${eventType.folder}:\n`;
-          message += `  • Ошибка: ${error.message}\n\n`;
-        }
-      }
-      
-      await ctx.reply(message, { parse_mode: 'Markdown' });
-      
-    } catch (error) {
-      console.error('Sync error:', error);
-      await ctx.reply(`❌ Ошибка при синхронизации:\n${error.message}`);
-    }
+    try { const n = await this.reports.discover(ctx.from.id); await this.replyLong(ctx, `Восстановлено с диска: ${n}.
+
+` + this.reports.pendingText(ctx.from.id)); } catch (error) { await ctx.reply(`Не удалось проверить диск: ${error.message}`); }
   }
 
   /**
    * Handle /pending command
    */
   async handlePending(ctx) {
-    const userId = ctx.from.id;
-    const settings = this.fileManager.getUserSettings(userId);
-    
-    let message = '📋 **Ваши незавершенные события:**\n\n';
-    let hasPending = false;
-    
-    // Check memory events
-    const pendingEvents = this.stateManager.getUserPendingEvents(userId);
-    
-    for (const event of pendingEvents) {
-      if (event.type === 'event') {
-        const eventType = event.eventType === 'raids' ? '🏰 Налёты, захваты' : '🚚 Поставки, ограбления';
-        message += `🧠 В памяти: #${event.eventNumber} - ${eventType}\n`;
-        message += `⏱️ Начато ${event.age} минут назад\n\n`;
-        hasPending = true;
-      }
-    }
-    
-    // Check Yandex Disk events
-    if (settings.yandexToken) {
-      const basePath = settings.yandexPath || config.defaultBasePath;
-      const weekFolder = require('../utils').getCurrentWeekFolder();
-      const isNight = require('../utils').isNightTime();
-      
-      const eventTypes = [
-        { display: '🏰 Налёты, захваты', folder: isNight ? 'Ночные налеты, захваты' : 'Налёты, захваты' },
-        { display: '🚚 Поставки, ограбления', folder: isNight ? 'Ночные поставки, ограбления (Краз, Air)' : 'Поставки, ограбления (Краз, Air)' }
-      ];
-      
-      for (const eventType of eventTypes) {
-        const remoteFolderPath = `${basePath}/${weekFolder}/${eventType.folder}`;
-        
-        try {
-          const unfinishedEvents = await this.eventManager.getUnfinishedEvents(userId, remoteFolderPath);
-          
-          for (const num of unfinishedEvents) {
-            message += `📁 На диске: #${num} - ${eventType.display}\n`;
-            message += `📍 Путь: ${remoteFolderPath}\n\n`;
-            hasPending = true;
-          }
-        } catch (error) {
-          // Ignore folder access errors
-        }
-      }
-    }
-    
-    if (!hasPending) {
-      message = '✅ У вас нет незавершенных событий';
-    } else {
-      message += '_Для завершения события отправьте фото и выберите "Конец события"_';
-    }
-    
-    await ctx.reply(message, { parse_mode: 'Markdown' });
+    await this.replyLong(ctx, this.reports.pendingText(ctx.from.id));
   }
 
   /**
    * Handle /pending_mp command
    */
   async handlePendingMP(ctx) {
-    const userId = ctx.from.id;
-    const settings = this.fileManager.getUserSettings(userId);
-    
-    let message = '📋 **Ваши незавершенные мероприятия (МП):**\n\n';
-    let hasPending = false;
-    
-    // Check memory MP events
-    const pendingEvents = this.stateManager.getUserPendingEvents(userId);
-    
-    for (const event of pendingEvents) {
-      if (event.type === 'mp') {
-        message += `🧠 В памяти: #${event.mpNumber} - МП\n`;
-        message += `⏱️ Начато ${event.age} минут назад\n\n`;
-        hasPending = true;
-      }
-    }
-    
-    // Check Yandex Disk MP events
-    if (settings.yandexToken) {
-      const basePath = settings.yandexPath || config.defaultBasePath;
-      const weekFolder = require('../utils').getCurrentWeekFolder();
-      const remoteFolderPath = `${basePath}/${weekFolder}/МП`;
-      
-      try {
-        const files = await this.yandexDisk.listFiles(userId, remoteFolderPath);
-        const mpNumbers = [];
-        const pattern = /^(\d+)-[12]\.(jpg|jpeg|png|gif)$/i;
-        
-        for (const filename of files) {
-          const match = pattern.exec(filename);
-          if (match) {
-            mpNumbers.push(parseInt(match[1], 10));
-          }
-        }
-        
-        for (const num of mpNumbers) {
-          const hasStart = files.some(f => f.startsWith(`${num}-1.`));
-          const hasEnd = files.some(f => f.startsWith(`${num}-2.`));
-          
-          if (hasStart && !hasEnd) {
-            message += `📁 На диске: #${num} - МП\n`;
-            message += `📍 Путь: ${remoteFolderPath}\n\n`;
-            hasPending = true;
-          }
-        }
-      } catch (error) {
-        // Ignore folder access errors
-      }
-    }
-    
-    if (!hasPending) {
-      message = '✅ У вас нет незавершенных мероприятий (МП)';
-    } else {
-      message += '_Для завершения мероприятия отправьте фото и выберите "Конец МП"_';
-    }
-    
-    await ctx.reply(message, { parse_mode: 'Markdown' });
+    await this.replyLong(ctx, this.reports.pendingText(ctx.from.id, true));
   }
 
   /**
    * Handle /clear_pending command
    */
   async handleClearPending(ctx) {
-    const userId = ctx.from.id;
-    const clearedCount = this.stateManager.clearUserPendingEvents(userId);
-    
-    if (clearedCount > 0) {
-      await ctx.reply(`✅ Очищено ${clearedCount} незавершенных событий`);
-    } else {
-      await ctx.reply('✅ У вас не было незавершенных событий');
+    if (!ctx.message.text.trim().endsWith(' confirm')) { await ctx.reply('Это уберёт незавершённые события из списка, но не удалит скриншоты. Для подтверждения: /clear_pending confirm. Активные загрузки будут сохранены.'); return; }
+    let count = 0;
+    for (const e of this.stateManager.listPending(ctx.from.id)) {
+      const related = [e.startJobId, e.endJobId].map(id => this.stateManager.jobs.get(id)).filter(Boolean);
+      if (related.some(j => j.status !== 'done')) continue;
+      this.stateManager.history.set(`abandoned:${e.id}`, { userId: ctx.from.id, folderPath: e.folderPath, number: e.eventNumber || e.mpNumber, abandoned: true });
+      this.stateManager.deletePendingEvent(ctx.from.id, e.type === 'mp' ? 'mp' : e.eventType, e.id); count++;
     }
+    this.stateManager.persist(); await ctx.reply(`Убрано из списка: ${count}. Файлы на диске сохранены.`);
   }
 
   /**
@@ -430,17 +337,17 @@ class CommandHandlers {
   async handleInitFolders(ctx) {
     const userId = ctx.from.id;
     const settings = this.fileManager.getUserSettings(userId);
-    
+
     if (!settings.yandexToken) {
       await ctx.reply('❌ Сначала настройте авторизацию через Яндекс.Диск (/auth)');
       return;
     }
-    
+
     await ctx.reply('🔄 Создаю базовую структуру папок...');
-    
+
     const basePath = settings.yandexPath || config.defaultBasePath;
     const weekFolder = require('../utils').getCurrentWeekFolder();
-    
+
     try {
       const folders = [
         `${basePath}/${weekFolder}/Наказания в игре`,
@@ -452,7 +359,7 @@ class CommandHandlers {
         `${basePath}/${weekFolder}/Ночные налеты, захваты`,
         `${basePath}/${weekFolder}/Ночные поставки, ограбления (Краз, Air)`
       ];
-      
+
       for (const folder of folders) {
         try {
           await this.yandexDisk.ensurePath(userId, folder);
@@ -460,9 +367,9 @@ class CommandHandlers {
           console.error(`Error creating folder ${folder}:`, error);
         }
       }
-      
+
       await ctx.reply(`✅ Базовая структура папок создана!\n\nПуть: ${basePath}/${weekFolder}`);
-      
+
     } catch (error) {
       console.error('Error creating folder structure:', error);
       await ctx.reply(`❌ Ошибка при создании папок:\n${error.message}`);
@@ -474,7 +381,8 @@ class CommandHandlers {
    */
   async handleResetWizard(ctx) {
     const userId = ctx.from.id;
-    this.stateManager.deleteWizardState(userId);
+    const state = this.stateManager.deleteWizardState(userId);
+    if (state?.filePathLocal) await this.fileManager.deleteLocalFile(state.filePathLocal);
     await ctx.reply('✅ Состояние визарда сброшено');
   }
 
@@ -483,22 +391,22 @@ class CommandHandlers {
    */
   async handleListPhotos(ctx) {
     try {
-      const files = this.fileManager.listLocalPhotos();
-      
+      const files = [...this.stateManager.jobs.values()].filter(j => j.userId === ctx.from.id && j.status !== 'done').map(j => require('path').basename(j.localPath));
+
       if (files.length === 0) {
         await ctx.reply('📁 Нет сохраненных фото');
         return;
       }
-      
-      const message = `📸 Сохраненные фото (${files.length}):\n\n` + 
+
+      const message = `📸 Сохраненные фото (${files.length}):\n\n` +
                      files.slice(0, 10).map((file, i) => `${i+1}. ${file}`).join('\n');
-      
+
       if (files.length > 10) {
         await ctx.reply(message + `\n\n... и еще ${files.length - 10} фото`);
       } else {
         await ctx.reply(message);
       }
-      
+
     } catch (error) {
       console.error('Error listing photos:', error);
       await ctx.reply('❌ Ошибка при получении списка фото');

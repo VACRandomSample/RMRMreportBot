@@ -6,6 +6,8 @@ const FileManager = require('./modules/fileManager');
 const YandexDisk = require('./modules/yandexDisk');
 const StateManager = require('./modules/stateManager');
 const EventManager = require('./modules/eventManager');
+const UploadQueue = require('./modules/uploadQueue');
+const ReportService = require('./modules/reportService');
 
 // Import handlers
 const CommandHandlers = require('./handlers/commands');
@@ -19,16 +21,22 @@ class TelegramBotApp {
     // Initialize modules
     this.fileManager = new FileManager();
     this.yandexDisk = new YandexDisk(this.fileManager);
-    this.stateManager = new StateManager();
+    this.stateManager = new StateManager(config.databasePath);
     this.eventManager = new EventManager(this.yandexDisk, this.stateManager, this.fileManager);
     
+    this.uploadQueue = new UploadQueue(this.stateManager, this.yandexDisk, this.fileManager, this.bot.telegram);
+    this.reports = new ReportService(this.stateManager, this.fileManager, this.bot.telegram, this.yandexDisk);
+    this.fileManager.stateManager = this.stateManager;
+
     // Initialize handlers
     this.commandHandlers = new CommandHandlers(
       this.bot, 
       this.fileManager, 
       this.yandexDisk, 
       this.stateManager, 
-      this.eventManager
+      this.eventManager,
+      this.uploadQueue,
+      this.reports
     );
     
     this.callbackHandlers = new CallbackHandlers(
@@ -36,7 +44,9 @@ class TelegramBotApp {
       this.fileManager, 
       this.yandexDisk, 
       this.stateManager, 
-      this.eventManager
+      this.eventManager,
+      this.uploadQueue,
+      this.reports
     );
     
     this.photoHandlers = new PhotoHandlers(
@@ -62,13 +72,9 @@ class TelegramBotApp {
       await this.fileManager.cleanupOldFiles();
     }, config.cleanupInterval);
 
-    // Cleanup expired pending events
-    setInterval(() => {
-      const cleanedCount = this.stateManager.cleanupPendingEvents();
-      if (cleanedCount > 0) {
-        console.log(`Cleaned up ${cleanedCount} expired events`);
-      }
-    }, config.cleanupInterval);
+    setInterval(() => this.uploadQueue.process().catch(console.error), config.queueInterval);
+    setInterval(() => this.reports.sendReminders().catch(console.error), config.reminderInterval);
+    this.uploadQueue.process().catch(console.error);
 
     console.log('Background tasks started');
   }
@@ -83,12 +89,14 @@ class TelegramBotApp {
     process.once('SIGINT', () => {
       console.log('Received SIGINT, shutting down gracefully...');
       this.bot.stop('SIGINT');
+      this.stateManager.close();
       process.exit(0);
     });
 
     process.once('SIGTERM', () => {
       console.log('Received SIGTERM, shutting down gracefully...');
       this.bot.stop('SIGTERM');
+      this.stateManager.close();
       process.exit(0);
     });
 
