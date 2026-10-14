@@ -14,20 +14,16 @@ function formatDate(date) {
 /**
  * Get current week folder name (format: "30.12.24 – 05.01.25")
  */
-function getCurrentWeekFolder() {
-  const now = new Date();
-  const dayOfWeek = now.getDay();
-  const startOfWeek = new Date(now);
-  
-  // Start of week - Monday (day = 1)
-  const diff = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-  startOfWeek.setDate(now.getDate() - diff);
-  
-  // End of week - Sunday
-  const endOfWeek = new Date(startOfWeek);
-  endOfWeek.setDate(startOfWeek.getDate() + 6);
-  
-  return `${formatDate(startOfWeek)} – ${formatDate(endOfWeek)}`;
+function getCurrentWeekFolder(date = new Date()) {
+  // Project the instant onto the Moscow calendar, independent of server TZ.
+  const now = new Date(date.getTime() + 3 * 60 * 60 * 1000);
+  const diff = (now.getUTCDay() + 6) % 7;
+  const start = new Date(now);
+  start.setUTCDate(now.getUTCDate() - diff);
+  const end = new Date(start);
+  end.setUTCDate(start.getUTCDate() + 6);
+  const label = value => `${String(value.getUTCDate()).padStart(2, '0')}.${String(value.getUTCMonth() + 1).padStart(2, '0')}.${String(value.getUTCFullYear()).slice(-2)}`;
+  return `${label(start)} – ${label(end)}`;
 }
 
 /**
@@ -44,8 +40,7 @@ function getWeekKey() {
 /**
  * Check if current time is night (00:00 - 09:00 MSK)
  */
-function isNightTime() {
-  const now = new Date();
+function isNightTime(now = new Date()) {
   const moscowOffset = 3; // UTC+3
   const moscowHours = (now.getUTCHours() + moscowOffset) % 24;
   return moscowHours >= 0 && moscowHours < 9;

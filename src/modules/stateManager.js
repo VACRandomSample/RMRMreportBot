@@ -1,4 +1,4 @@
-const { getWeekKey, isNightTime } = require('../utils');
+const { getWeekKey } = require('../utils');
 
 class StateManager {
   constructor() {
@@ -47,9 +47,10 @@ class StateManager {
   /**
    * Pending Events Management
    */
-  setPendingEvent(userId, eventType, eventNumber) {
+  setPendingEvent(userId, eventType, eventNumber, location = {}) {
     const key = `${userId}_${eventType}`;
     this.pendingEvents.set(key, {
+      ...location,
       eventNumber,
       eventType,
       timestamp: Date.now()
@@ -72,12 +73,13 @@ class StateManager {
   /**
    * Pending MP Events Management
    */
-  setPendingMPEvent(userId, mpNumber, folderPath) {
+  setPendingMPEvent(userId, mpNumber, folderPath, weekFolder) {
     const key = `${userId}_mp`;
     this.pendingMPEvents.set(key, {
       mpNumber,
       timestamp: Date.now(),
-      folderPath
+      folderPath,
+      weekFolder
     });
   }
 

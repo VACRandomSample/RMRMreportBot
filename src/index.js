@@ -42,7 +42,8 @@ class TelegramBotApp {
     this.photoHandlers = new PhotoHandlers(
       this.bot, 
       this.fileManager, 
-      this.stateManager
+      this.stateManager,
+      this.callbackHandlers
     );
     
     // Start background tasks
