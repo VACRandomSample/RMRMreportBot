@@ -6,6 +6,7 @@
   "author": "",
   "type": "commonjs",
   "main": "src/index.js",
+  "engines": { "node": ">=22.13.0" },
   "scripts": {
     "dev": "nodemon .",
     "test": "node --test"

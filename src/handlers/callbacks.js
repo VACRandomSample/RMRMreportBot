@@ -3,12 +3,14 @@ const { getCurrentWeekFolder, isNightTime } = require('../utils');
 const config = require('../config');
 
 class CallbackHandlers {
-  constructor(bot, fileManager, yandexDisk, stateManager, eventManager) {
+  constructor(bot, fileManager, yandexDisk, stateManager, eventManager, uploadQueue = null, reports = null) {
     this.bot = bot;
     this.fileManager = fileManager;
     this.yandexDisk = yandexDisk;
     this.stateManager = stateManager;
     this.eventManager = eventManager;
+    this.uploadQueue = uploadQueue;
+    this.reports = reports;
     
     this.registerCallbacks();
   }
@@ -22,21 +24,134 @@ class CallbackHandlers {
     this.bot.action('disconnect_button', this.handleDisconnectButton.bind(this));
     
     // Wizard callbacks
-    this.bot.action('category_punishments', this.handleCategoryPunishments.bind(this));
-    this.bot.action('category_mp', this.handleCategoryMP.bind(this));
-    this.bot.action('category_mp_help', this.handleCategoryMPHelp.bind(this));
-    this.bot.action('category_events', this.handleCategoryEvents.bind(this));
-    this.bot.action('event_raids', this.handleEventRaids.bind(this));
-    this.bot.action('event_supplies', this.handleEventSupplies.bind(this));
-    this.bot.action('event_start', this.handleEventStart.bind(this));
-    this.bot.action('event_end', this.handleEventEnd.bind(this));
-    this.bot.action('mp_start', this.handleMPStart.bind(this));
-    this.bot.action('mp_end', this.handleMPEnd.bind(this));
+    this.wizardAction('category_punishments', this.handleCategoryPunishments.bind(this));
+    this.wizardAction('category_mp', this.handleCategoryMP.bind(this));
+    this.wizardAction('category_mp_help', this.handleCategoryMPHelp.bind(this));
+    this.wizardAction('category_events', this.handleCategoryEvents.bind(this));
+    this.wizardAction('event_raids', this.handleEventRaids.bind(this));
+    this.wizardAction('event_supplies', this.handleEventSupplies.bind(this));
+    this.wizardAction('event_start', this.handleEventStart.bind(this));
+    this.wizardAction('event_end', this.handleEventEnd.bind(this));
+    this.wizardAction('mp_start', this.handleMPStart.bind(this));
+    this.wizardAction('mp_end', this.handleMPEnd.bind(this));
     
     // Navigation callbacks
-    this.bot.action('back_to_step1', this.handleBackToStep1.bind(this));
-    this.bot.action('back_to_step2', this.handleBackToStep2.bind(this));
-    this.bot.action('cancel_wizard', this.handleCancelWizard.bind(this));
+    this.wizardAction('back_to_step1', this.handleBackToStep1.bind(this));
+    this.wizardAction('back_to_step2', this.handleBackToStep2.bind(this));
+    this.wizardAction('cancel_wizard', this.handleCancelWizard.bind(this));
+    this.wizardAction(/^finish_([a-f0-9]{32})$/, this.handleSelectedEnd.bind(this));
+    this.wizardAction(/^choices_(\d+)$/, async ctx => {
+      const state = this.stateManager.getWizardState(ctx.from.id);
+      state.data.choicePage = Number(ctx.match[1]);
+      await ctx.answerCbQuery();
+      const category = state.data.category === 'mp' ? 'mp' : state.data.eventType;
+      await this.saveQueuedPair(ctx, ctx.from.id, category, 'end');
+    });
+  }
+
+  wizardAction(pattern, handler) {
+    this.bot.action(pattern, ctx => this.stateManager.withUserLock(ctx.from.id, async () => {
+      const state = this.stateManager.getWizardState(ctx.from.id);
+      const message = ctx.callbackQuery?.message;
+      if (!state || !message || message.message_id !== state.messageId || message.chat.id !== state.chatId) {
+        await ctx.answerCbQuery('Эта кнопка устарела. Используйте меню текущего фото.');
+        return;
+      }
+      const allowed = {
+        1: ['category_punishments', 'category_mp', 'category_mp_help', 'category_events', 'cancel_wizard'],
+        2: ['event_raids', 'event_supplies', 'back_to_step1', 'cancel_wizard'],
+        3: ['event_start', 'event_end', 'back_to_step2', 'cancel_wizard'],
+        mp_stage: ['mp_start', 'mp_end', 'back_to_step1', 'cancel_wizard']
+      };
+      const data = ctx.callbackQuery.data;
+      const valid = state.step === 'choose_end' ? /^(finish_|choices_|cancel_wizard$)/.test(data) : (allowed[state.step] || []).includes(data);
+      if (!valid) { await ctx.answerCbQuery('Меню изменилось. Используйте текущие кнопки.'); return; }
+      try { await handler(ctx); }
+      catch (error) { console.error('Callback failed:', error.message); await ctx.reply('Не удалось обработать действие. /uploads — очередь, /reset_wizard — отменить выбор.'); }
+      finally { this.stateManager.persist(); }
+    }));
+  }
+
+  async handleSelectedEnd(ctx) {
+    const state = this.stateManager.getWizardState(ctx.from.id);
+    const id = ctx.match[1];
+    const category = state.data.category === 'mp' ? 'mp' : state.data.eventType;
+    const event = this.stateManager.getPendingEvent(ctx.from.id, category, id);
+    if (!event || event.endJobId) { await ctx.answerCbQuery('Событие уже завершается или недоступно'); return; }
+    state.data.selectedEventId = id;
+    await ctx.answerCbQuery();
+    await this.saveQueuedPair(ctx, ctx.from.id, category, 'end');
+  }
+
+  async saveQueuedSingle(ctx, userId, category, folderName) {
+    const state = this.stateManager.getWizardState(userId);
+    const weekFolder = getCurrentWeekFolder(new Date(state.reportAt || state.receivedAt));
+    const folderPath = `${this.getBasePath(userId, state)}/${weekFolder}/${folderName}`;
+    const ext = require('path').extname(state.filePathLocal);
+    const remotePath = `${folderPath}/${category}_${require('node:crypto').randomUUID()}${ext}`;
+    const job = this.uploadQueue.enqueue(userId, state, { category, folderPath, weekFolder, folderName, remotePath, stage: 'single' });
+    await this.editMessage(ctx, state, `📤 Фото добавлено в очередь.
+${job.remotePath}
+Подтверждение придёт после сохранения. /uploads — статус.`, true);
+  }
+
+  async showQueueError(ctx, state, text, category, stage) {
+    state.step = category === 'mp' ? 'mp_stage' : 3;
+    const prefix = category === 'mp' ? 'mp' : 'event';
+    await ctx.telegram.editMessageText(state.chatId, state.messageId, null, text, {
+      reply_markup: Markup.inlineKeyboard([
+        [Markup.button.callback('🔄 Повторить', `${prefix}_${stage}`)],
+        [Markup.button.callback('⬅️ Назад', category === 'mp' ? 'back_to_step1' : 'back_to_step2')],
+        [Markup.button.callback('❌ Отмена', 'cancel_wizard')]
+      ]).reply_markup
+    });
+  }
+
+  async saveQueuedPair(ctx, userId, category, stage) {
+    const state = this.stateManager.getWizardState(userId);
+    if (!state) return;
+    let admitted = false;
+    try {
+      const candidates = this.stateManager.listPending(userId, category).filter(e => !e.endJobId);
+      let event;
+      if (stage === 'end') {
+        event = state.data.selectedEventId ? candidates.find(e => e.id === state.data.selectedEventId) : (candidates.length === 1 ? candidates[0] : null);
+        if (!event) {
+          if (!candidates.length) { await this.showQueueError(ctx, state, 'Начало события не найдено. Выполните /sync_events и нажмите «Повторить» либо вернитесь к выбору этапа.', category, stage); return; }
+          state.step = 'choose_end';
+          const page = Math.max(0, Math.min(state.data.choicePage || 0, Math.floor((candidates.length - 1) / 8)));
+          const buttons = candidates.slice(page * 8, page * 8 + 8).map(e => [Markup.button.callback(`#${e.eventNumber || e.mpNumber} · ${e.weekFolder} · ${e.folderName || 'МП'}`, `finish_${e.id}`)]);
+          const navigation = [];
+          if (page > 0) navigation.push(Markup.button.callback('⬅️', `choices_${page - 1}`));
+          if ((page + 1) * 8 < candidates.length) navigation.push(Markup.button.callback('➡️', `choices_${page + 1}`));
+          if (navigation.length) buttons.push(navigation);
+          buttons.push([Markup.button.callback('❌ Отмена', 'cancel_wizard')]);
+          await ctx.telegram.editMessageText(state.chatId, state.messageId, null, 'Какое событие завершить?', { reply_markup: Markup.inlineKeyboard(buttons).reply_markup });
+          return;
+        }
+      }
+      const date = new Date(state.reportAt || state.receivedAt);
+      const weekFolder = event?.weekFolder || getCurrentWeekFolder(date);
+      const names = category === 'mp' ? { name: 'МП', nightName: 'МП' } : config.categories.events.types[category];
+      const folderName = event?.folderName || (isNightTime(date) ? names.nightName : names.name);
+      const folderPath = event?.folderPath || `${this.getBasePath(userId, state)}/${weekFolder}/${folderName}`;
+      let number = event?.eventNumber || event?.mpNumber;
+      if (stage === 'start') {
+        // Reserve synchronously after disk lookup; queued and completed jobs also reserve numbers.
+        const next = category === 'mp' ? await this.eventManager.getNextMPNumber(userId, folderPath) : await this.eventManager.getNextEventNumber(userId, folderPath);
+        number = Math.max(next, this.stateManager.reservedNumber(folderPath) + 1);
+      }
+      const ext = require('path').extname(state.filePathLocal);
+      const remotePath = `${folderPath}/${number}-${stage === 'start' ? 1 : 2}${ext}`;
+      const job = this.uploadQueue.enqueue(userId, state, { category, stage, eventId: event?.id, folderPath, weekFolder, folderName, number, remotePath });
+      admitted = true;
+      await this.editMessage(ctx, state, `📤 Скриншот ${stage === 'start' ? 'начала' : 'окончания'} #${number} добавлен в очередь.
+${job.remotePath}
+Подтверждение придёт после сохранения. /uploads — статус.`, true);
+    } catch (error) {
+      if (admitted) { await ctx.reply('Фото уже в очереди. /uploads — статус.'); return; }
+      await this.showQueueError(ctx, state, `Не удалось добавить фото: ${error.message}. Фото оставлено для повторной попытки.`, category, stage);
+    }
   }
 
   /**
@@ -56,8 +171,7 @@ class CallbackHandlers {
     await ctx.answerCbQuery();
     // Reuse command handler
     const CommandHandlers = require('./commands');
-    const cmdHandlers = new CommandHandlers(this.bot, this.fileManager, this.yandexDisk, this.stateManager, this.eventManager);
-    await cmdHandlers.handleTest(ctx);
+    await CommandHandlers.prototype.handleTest.call(this, ctx);
   }
 
   async handleCurrentSettings(ctx) {
@@ -97,10 +211,12 @@ class CallbackHandlers {
     if (!state) return;
     
     const basePath = this.getBasePath(userId, state);
-    const weekFolder = getCurrentWeekFolder(new Date(state.receivedAt || Date.now()));
-    const isNight = isNightTime(new Date(state.receivedAt || Date.now()));
+    const weekFolder = getCurrentWeekFolder(new Date(state.reportAt || state.receivedAt || Date.now()));
+    const isNight = isNightTime(new Date(state.reportAt || state.receivedAt || Date.now()));
     const folderName = isNight ? 'Ночные наказания в игре' : 'Наказания в игре';
     
+    if (this.uploadQueue) return this.saveQueuedSingle(ctx, userId, 'punishment', folderName);
+
     const fileName = `punishment_${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
     const remotePath = `${basePath}/${weekFolder}/${folderName}/${fileName}`;
     
@@ -149,8 +265,10 @@ class CallbackHandlers {
     if (!state) return;
     
     const basePath = this.getBasePath(userId, state);
-    const weekFolder = getCurrentWeekFolder(new Date(state.receivedAt || Date.now()));
+    const weekFolder = getCurrentWeekFolder(new Date(state.reportAt || state.receivedAt || Date.now()));
     
+    if (this.uploadQueue) return this.saveQueuedSingle(ctx, userId, 'mp_help', 'Помощь в МП');
+
     const fileName = `mp_help_${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
     const remotePath = `${basePath}/${weekFolder}/Помощь в МП/${fileName}`;
     
@@ -306,13 +424,13 @@ class CallbackHandlers {
     return this.yandexDisk.uploadFile(userId, localFilePath, remotePath);
   }
 
-  async editMessage(ctx, state, text) {
+  async editMessage(ctx, state, text, plain = false) {
     await ctx.telegram.editMessageText(
       state.chatId,
       state.messageId,
       null,
       text,
-      { parse_mode: 'Markdown' }
+      plain ? {} : { parse_mode: 'Markdown' }
     );
   }
 
@@ -337,13 +455,14 @@ class CallbackHandlers {
       '2. 📋 **МП** - отчеты о проведенных мероприятиях (2 скриншота: начало и конец)\n' +
       '3. 🤝 **Помощь в МП** - отчеты о помощи в проведении (1 скриншот)\n' +
       '4. ⚡ **События** - отчеты о слежке за событиями (2 скриншота: начало и конец)\n\n' +
-      '_Выберите категорию:_',
+      '_Выберите категорию:_\n\nВремя скриншота можно задать: /time ДД.ММ.ГГГГ ЧЧ:ММ (МСК)',
       { parse_mode: 'Markdown', reply_markup: keyboard.reply_markup }
     );
     
     state.messageId = message.message_id;
     state.chatId = ctx.chat.id;
     state.step = 1;
+    this.stateManager.persist();
   }
 
   async sendStep2(ctx, userId) {
@@ -357,7 +476,7 @@ class CallbackHandlers {
       [Markup.button.callback('❌ Отмена', 'cancel_wizard')]
     ]);
     
-    const nightPrefix = isNightTime(new Date(state.receivedAt || Date.now())) ? 'Ночные ' : '';
+    const nightPrefix = isNightTime(new Date(state.reportAt || state.receivedAt || Date.now())) ? 'Ночные ' : '';
     
     await ctx.telegram.editMessageText(
       state.chatId,
@@ -378,10 +497,11 @@ class CallbackHandlers {
     if (!state) return;
     
     state.data.eventType = eventType;
+    state.data.category = 'events';
     
     const basePath = this.getBasePath(userId, state);
-    const weekFolder = getCurrentWeekFolder(new Date(state.receivedAt || Date.now()));
-    const isNight = isNightTime(new Date(state.receivedAt || Date.now()));
+    const weekFolder = getCurrentWeekFolder(new Date(state.reportAt || state.receivedAt || Date.now()));
+    const isNight = isNightTime(new Date(state.reportAt || state.receivedAt || Date.now()));
     
     // Determine folder name based on event type and time
     let folderName;
@@ -458,7 +578,7 @@ class CallbackHandlers {
     if (!state) return;
     
     const basePath = this.getBasePath(userId, state);
-    const weekFolder = getCurrentWeekFolder(new Date(state.receivedAt || Date.now()));
+    const weekFolder = getCurrentWeekFolder(new Date(state.reportAt || state.receivedAt || Date.now()));
     const pending = this.stateManager.getPendingMPEvent(userId);
     const remoteFolderPath = pending?.folderPath || `${basePath}/${weekFolder}/МП`;
     
@@ -529,9 +649,11 @@ class CallbackHandlers {
       return;
     }
     
+    if (this.uploadQueue) return this.saveQueuedPair(ctx, userId, state.data.eventType, stage);
+
     const basePath = this.getBasePath(userId, state);
-    let weekFolder = getCurrentWeekFolder(new Date(state.receivedAt || Date.now()));
-    const isNight = isNightTime(new Date(state.receivedAt || Date.now()));
+    let weekFolder = getCurrentWeekFolder(new Date(state.reportAt || state.receivedAt || Date.now()));
+    const isNight = isNightTime(new Date(state.reportAt || state.receivedAt || Date.now()));
     const eventType = state.data.eventType;
     
     // Determine folder name
@@ -651,8 +773,10 @@ class CallbackHandlers {
     const state = this.stateManager.getWizardState(userId);
     if (!state) return;
     
+    if (this.uploadQueue) return this.saveQueuedPair(ctx, userId, 'mp', stage);
+
     const basePath = this.getBasePath(userId, state);
-    let weekFolder = getCurrentWeekFolder(new Date(state.receivedAt || Date.now()));
+    let weekFolder = getCurrentWeekFolder(new Date(state.reportAt || state.receivedAt || Date.now()));
     let remoteFolderPath = `${basePath}/${weekFolder}/МП`;
     
     const pendingMP = stage === 'end' ? this.stateManager.getPendingMPEvent(userId) : null;

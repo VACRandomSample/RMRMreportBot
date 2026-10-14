@@ -49,10 +49,11 @@ function isNightTime(now = new Date()) {
 /**
  * Generate unique filename
  */
-function generateFileName(prefix = 'photo') {
+function generateFileName(prefix = 'photo', extension = '.jpg') {
   const timestamp = Date.now();
   const random = Math.random().toString(36).substring(7);
-  return `${prefix}_${timestamp}_${random}.jpg`;
+  const ext = extension.startsWith('.') ? extension : `.${extension}`;
+  return `${prefix}_${timestamp}_${random}${ext.toLowerCase()}`;
 }
 
 /**
@@ -60,7 +61,7 @@ function generateFileName(prefix = 'photo') {
  */
 function extractEventNumbers(filenames) {
   const numbers = [];
-  const pattern = /^(\d+)-[12]\.(jpg|jpeg|png|gif)$/i;
+  const pattern = /^(\d+)-[12]\.(jpg|jpeg|png|gif|webp)$/i;
   
   for (const filename of filenames) {
     const match = pattern.exec(filename);

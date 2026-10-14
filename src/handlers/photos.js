@@ -14,10 +14,10 @@ class PhotoHandlers {
 
   registerHandlers() {
     // Handle photo messages
-    this.bot.on(message('photo'), this.handlePhoto.bind(this));
+    this.bot.on(message('photo'), ctx => this.stateManager.withUserLock(ctx.from.id, () => this.handlePhoto(ctx)));
     
     // Handle photo documents
-    this.bot.on(message('document'), this.handleDocument.bind(this));
+    this.bot.on(message('document'), ctx => this.stateManager.withUserLock(ctx.from.id, () => this.handleDocument(ctx)));
     
     // Handle settings button
     this.bot.hears('⚙️ Настройки', this.handleSettingsButton.bind(this));
@@ -28,6 +28,15 @@ class PhotoHandlers {
    */
   async handlePhoto(ctx) {
     const userId = ctx.from.id;
+    const sourceKey = `${userId}:${ctx.chat.id}:${ctx.message.message_id}`;
+    if ([...this.stateManager.jobs.values()].some(j => j.sourceKey === sourceKey)) {
+      await ctx.reply('Это фото уже принято. /uploads — статус загрузки.');
+      return;
+    }
+    if (this.stateManager.getWizardState(userId)) {
+      await ctx.reply('Сначала сохраните или отмените предыдущее фото. /reset_wizard — отменить.');
+      return;
+    }
     const receivedAt = new Date(ctx.message.date * 1000).toISOString();
     
     try {
@@ -43,14 +52,16 @@ class PhotoHandlers {
       this.stateManager.setWizardState(userId, {
         step: 1,
         receivedAt,
+        sourceMessageId: ctx.message.message_id,
         fileId,
         filePathLocal,
         user: ctx.from,
         caption: ctx.message.caption || '',
-        data: {},
+        data: { selectedEventId: this.fileManager.getUserSettings?.(userId).suggestedEventId },
         chatId: ctx.chat.id
       });
       
+      if (this.fileManager.updateUserSettings) this.fileManager.updateUserSettings(userId, { suggestedEventId: null });
       // Start wizard
       await this.callbackHandlers.sendStep1(ctx, userId);
       
@@ -72,6 +83,15 @@ class PhotoHandlers {
     }
     
     const userId = ctx.from.id;
+    const sourceKey = `${userId}:${ctx.chat.id}:${ctx.message.message_id}`;
+    if ([...this.stateManager.jobs.values()].some(j => j.sourceKey === sourceKey)) {
+      await ctx.reply('Это фото уже принято. /uploads — статус загрузки.');
+      return;
+    }
+    if (this.stateManager.getWizardState(userId)) {
+      await ctx.reply('Сначала сохраните или отмените предыдущее фото. /reset_wizard — отменить.');
+      return;
+    }
     const receivedAt = new Date(ctx.message.date * 1000).toISOString();
     
     try {
@@ -79,12 +99,13 @@ class PhotoHandlers {
       const file = await ctx.telegram.getFile(fileId);
       const filePath = file.file_path;
       
-      // Get file extension
-      const path = require('path');
-      const ext = path.extname(document.file_name) || 
-                 document.mime_type.split('/')[1] || 
-                 'jpg';
-      
+      const extensions = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'image/webp': '.webp' };
+      const ext = extensions[document.mime_type];
+      if (!ext) {
+        await ctx.reply('Поддерживаются JPG, PNG, GIF и WebP. Отправьте изображение в одном из этих форматов.');
+        return;
+      }
+
       const fileUrl = `https://api.telegram.org/file/bot${this.bot.token}/${filePath}`;
       const filePathLocal = await this.fileManager.downloadFile(fileUrl, generateFileName('photo', ext));
       
@@ -92,14 +113,16 @@ class PhotoHandlers {
       this.stateManager.setWizardState(userId, {
         step: 1,
         receivedAt,
+        sourceMessageId: ctx.message.message_id,
         fileId,
         filePathLocal,
         user: ctx.from,
         caption: ctx.message.caption || '',
-        data: {},
+        data: { selectedEventId: this.fileManager.getUserSettings?.(userId).suggestedEventId },
         chatId: ctx.chat.id
       });
       
+      if (this.fileManager.updateUserSettings) this.fileManager.updateUserSettings(userId, { suggestedEventId: null });
       // Start wizard
       await this.callbackHandlers.sendStep1(ctx, userId);
       

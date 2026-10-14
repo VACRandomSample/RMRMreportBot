@@ -18,6 +18,10 @@ const config = {
   photosDir: require('path').join(__dirname, '../../photos'),
   settingsFile: require('path').join(__dirname, '../../user_settings.json'),
   
+  databasePath: process.env.STATE_DB_PATH || require('path').join(__dirname, '../../data/state.sqlite'),
+  queueInterval: 15000,
+  reminderInterval: 60 * 60 * 1000,
+
   // App Settings
   defaultBasePath: '/RMRPreport',
   cleanupInterval: 30 * 60 * 1000, // 30 minutes

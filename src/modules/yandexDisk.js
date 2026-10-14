@@ -5,8 +5,9 @@ const { URL } = require('url');
 const config = require('../config');
 
 class YandexDisk {
-  constructor(fileManager) {
+  constructor(fileManager, transport = https) {
     this.fileManager = fileManager;
+    this.transport = transport;
     this.apiHost = config.yandex.apiHost;
     this.resourceUrl = config.yandex.resourceUrl;
   }
@@ -41,7 +42,7 @@ class YandexDisk {
         headers: headers
       };
 
-      const req = https.request(options, (res) => {
+      const req = this.transport.request(options, (res) => {
         let data = '';
 
         res.on('data', (chunk) => {
@@ -49,7 +50,8 @@ class YandexDisk {
         });
 
         res.on('end', async () => {
-          let obj = data ? JSON.parse(data) : null;
+          let obj;
+          try { obj = data ? JSON.parse(data) : null; } catch { reject(new Error(`Invalid API response: HTTP ${res.statusCode}`)); return; }
           const status = res.statusCode;
 
           // Handle redirect for upload
@@ -78,6 +80,7 @@ class YandexDisk {
         });
       });
 
+      req.setTimeout(30000, () => req.destroy(new Error('Yandex request timeout')));
       req.on('error', (error) => {
         reject(error);
       });
@@ -119,7 +122,7 @@ class YandexDisk {
   /**
    * Get upload link for file
    */
-  async getUploadLink(userId, remotePath, overwrite = true) {
+  async getUploadLink(userId, remotePath, overwrite = false) {
     return this.request(userId, 'GET', `${this.resourceUrl}/upload`, { 
       path: remotePath, 
       overwrite: overwrite.toString() 
@@ -131,6 +134,18 @@ class YandexDisk {
    */
   async uploadFile(userId, localFilePath, remoteFilePath) {
     try {
+      // After a lost response, reconcile using exact bytes; never overwrite another report.
+      const crypto = require('node:crypto');
+      const hash = crypto.createHash('md5');
+      for await (const chunk of fs.createReadStream(localFilePath)) hash.update(chunk);
+      const md5 = hash.digest('hex');
+      try {
+        const remote = await this.request(userId, 'GET', this.resourceUrl, { path: remoteFilePath });
+        if (remote.md5 === md5 && remote.size === fs.statSync(localFilePath).size) return true;
+        throw new Error('Конфликт: файл с таким именем уже существует и имеет другое содержимое');
+      } catch (error) {
+        if (!error.message.includes('404')) throw error;
+      }
       // Ensure folder path exists
       const lastSlashIndex = remoteFilePath.lastIndexOf('/');
       const folderPath = remoteFilePath.substring(0, lastSlashIndex);
@@ -148,7 +163,7 @@ class YandexDisk {
       const fileStream = fs.createReadStream(localFilePath);
       const uploadUrl = new URL(uploadData.href);
       
-      return new Promise((resolve, reject) => {
+      await new Promise((resolve, reject) => {
         const options = {
           hostname: uploadUrl.hostname,
           port: 443,
@@ -159,54 +174,50 @@ class YandexDisk {
           }
         };
 
-        const req = https.request(options, (res) => {
+        const req = this.transport.request(options, (res) => {
+          res.resume();
           if (res.statusCode === 201 || res.statusCode === 202) {
-            // Delete local file after successful upload
-            this.fileManager.deleteLocalFile(localFilePath);
+            // Local deletion belongs to the queue after its durable confirmation.
             resolve(true);
           } else {
             reject(new Error(`Upload error: ${res.statusCode}`));
           }
         });
 
+        req.setTimeout(60000, () => req.destroy(new Error('Upload timeout')));
+        fileStream.on('error', error => req.destroy(error));
         req.on('error', (error) => {
           reject(error);
         });
 
         fileStream.pipe(req);
       });
+      const confirmed = await this.request(userId, 'GET', this.resourceUrl, { path: remoteFilePath });
+      if (confirmed.md5 !== md5 || confirmed.size !== fs.statSync(localFilePath).size) throw new Error('Содержимое загрузки ещё не подтверждено');
+      return true;
 
     } catch (error) {
-      console.error('Error uploading to Yandex Disk:', error);
-      return false;
+      throw error;
     }
   }
 
   /**
    * List files in folder
    */
-  async listFiles(userId, folderPath) {
-    try {
-      const result = await this.request(userId, 'GET', this.resourceUrl, { 
-        path: folderPath,
-        limit: 1000 
-      });
-
-      if (result._embedded && result._embedded.items) {
-        return result._embedded.items
-          .filter(item => item.type === 'file')
-          .map(item => item.name);
-      }
-      
-      return [];
-    } catch (error) {
-      // If folder doesn't exist (404) or is empty, return empty array
-      if (error.message.includes('404') || error.message.includes('DiskNotFoundError')) {
-        return [];
-      }
-      throw error;
+  async listEntries(userId, folderPath) {
+    const items = [];
+    for (let offset = 0; ; offset += 1000) {
+      let result;
+      try { result = await this.request(userId, 'GET', this.resourceUrl, { path: folderPath, limit: 1000, offset }); }
+      catch (error) { if (error.message.includes('404')) return []; throw error; }
+      const page = result?._embedded?.items || [];
+      items.push(...page);
+      if (page.length < 1000) break;
     }
+    return items;
   }
+  async listFiles(userId, folderPath) { return (await this.listEntries(userId, folderPath)).filter(e => e.type === 'file').map(e => e.name); }
+  async listFolders(userId, folderPath) { return (await this.listEntries(userId, folderPath)).filter(e => e.type === 'dir').map(e => e.name); }
 
   /**
    * Delete file or folder
@@ -219,7 +230,7 @@ class YandexDisk {
    * Get disk info
    */
   async getDiskInfo(userId) {
-    return this.request(userId, 'GET', this.resourceUrl, { path: '/' });
+    return this.request(userId, 'GET', '/v1/disk');
   }
 }
 
