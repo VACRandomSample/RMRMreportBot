@@ -35,7 +35,7 @@ class EventManager {
     try {
       const files = await this.yandexDisk.listFiles(userId, folderPath);
       const mpNumbers = [];
-      const pattern = /^(\d+)-[12]\.(jpg|jpeg|png|gif)$/i;
+      const pattern = /^(\d+)-[12]\.(jpg|jpeg|png|gif|webp)$/i;
       
       for (const filename of files) {
         const match = pattern.exec(filename);
@@ -64,8 +64,8 @@ class EventManager {
     try {
       const files = await this.yandexDisk.listFiles(userId, folderPath);
       
-      const startPattern = new RegExp(`^${eventNumber}-1\\.(jpg|jpeg|png|gif)$`, 'i');
-      const endPattern = new RegExp(`^${eventNumber}-2\\.(jpg|jpeg|png|gif)$`, 'i');
+      const startPattern = new RegExp(`^${eventNumber}-1\\.(jpg|jpeg|png|gif|webp)$`, 'i');
+      const endPattern = new RegExp(`^${eventNumber}-2\\.(jpg|jpeg|png|gif|webp)$`, 'i');
       
       const hasStart = files.some(file => startPattern.test(file));
       const hasEnd = files.some(file => endPattern.test(file));
